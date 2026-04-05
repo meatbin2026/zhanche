@@ -6,6 +6,14 @@
   var adRewardDisabledNoticeText = "单机版暂时关闭广告奖励，页面流程会继续但不发奖";
   var offlineConfig = {
     adRewardsEnabled: false,
+    testSaveEnabled: true,
+    testSaveChapter: 10,
+    testSaveResourceFloor: {
+      gold: 200000,
+      diamond: 3000,
+      energy: 200,
+      exp: 4000,
+    },
     maxLogs: 20,
     debugPanelVisible: false,
   };
@@ -19,6 +27,7 @@
     debugInstalled: false,
     cornerTapCount: 0,
     cornerTapUntil: 0,
+    lastTestSaveSignature: "",
   };
 
   function now() {
@@ -75,6 +84,13 @@
     patchState.quickMatch = !!(
         !(window.quickMatch || safeRequire("quickMatch")) ||
         (window.quickMatch || safeRequire("quickMatch")).__offlineSingleplayerPatched
+    );
+    patchState.testSave = !!(
+      !(window.pc || safeRequire("pc")) || (window.pc || safeRequire("pc")).__offlineSingleplayerSavePatched
+    );
+    patchState.userDataMgr = !!(
+      !safeRequire("userDataMgr") ||
+      (safeRequire("userDataMgr").getInstance && safeRequire("userDataMgr").getInstance().__offlineSingleplayerPatched)
     );
     patchState.userInfoMenu = !!(
       !safeRequire("UserInfoMenu") || safeRequire("UserInfoMenu").prototype.__offlineSingleplayerPatched
@@ -158,6 +174,8 @@
       social: "社交占位",
       pvp: "PVP降级",
       quickMatch: "匹配降级",
+      testSave: "测试存档",
+      userDataMgr: "资源存档",
       userInfoMenu: "资料页",
       friendMenu: "好友页",
       favoriteMenu: "关注页",
@@ -175,6 +193,7 @@
       sdk: "广告",
       nativeSdk: "原生",
       task: "任务",
+      progression: "测试档",
       "reward-off": "奖励",
       "reward-block": "奖励",
     };
@@ -204,6 +223,8 @@
       "离线调试面板",
       "当前场景：" + getCurrentSceneName(),
       "离线模式：已开启",
+      "测试存档：" + (offlineConfig.testSaveEnabled ? "第" + offlineConfig.testSaveChapter + "章" : "已关闭"),
+      "当前进度：" + getProgressionSummary(),
       "广告奖励：" + (offlineConfig.adRewardsEnabled ? "已开启" : "已关闭"),
       "待拦截奖励：" + pending,
       "签到次数：" + (ensureSignState().signCount || 0),
@@ -505,6 +526,333 @@
     }
   }
 
+  function toNumber(value, fallback) {
+    var num = Number(value);
+    return isNaN(num) ? fallback : num;
+  }
+
+  function getTargetChapterIndex() {
+    return Math.max(0, toNumber(offlineConfig.testSaveChapter, 10) - 1);
+  }
+
+  function getDisplayedChapterNumber(chapterIndex) {
+    return Math.max(1, toNumber(chapterIndex, 0) + 1);
+  }
+
+  function getChapterStageStart(chapterIndex) {
+    var adventure = window.adventure || safeRequire("adventure");
+    if (adventure && adventure.chapterToStage) {
+      return adventure.chapterToStage(chapterIndex, 0);
+    }
+    var chapters = window.CHAPTER_DEFINE_ARRAY || [];
+    var total = 0;
+    for (var i = 0; i < chapterIndex; i += 1) {
+      total += chapters[i] && chapters[i].stage ? chapters[i].stage.length : 0;
+    }
+    return total;
+  }
+
+  function getStageDisplayName(stageIndex) {
+    var adventure = window.adventure || safeRequire("adventure");
+    if (adventure && adventure.stageToName) {
+      return adventure.stageToName(Math.max(0, toNumber(stageIndex, 0))) || "未知";
+    }
+    return "未知";
+  }
+
+  function getProgressionSummary() {
+    var pc = window.pc || safeRequire("pc");
+    if (!pc) return "未初始化";
+    var chapterIndex = typeof pc.getChapterIndex === "function" ? pc.getChapterIndex() : pc.chapterIndex;
+    var stageIndex = toNumber(pc.stageIndex, 0);
+    return "第" + getDisplayedChapterNumber(chapterIndex) + "章 / " + getStageDisplayName(stageIndex);
+  }
+
+  function getExcelRows(name) {
+    var excel = window.excel || safeRequire("excel");
+    if (!excel || !excel.read) return [];
+    var rows = excel.read(name) || [];
+    return Object.keys(rows)
+      .sort(function (left, right) {
+        var leftNum = Number(left);
+        var rightNum = Number(right);
+        if (!isNaN(leftNum) && !isNaN(rightNum)) {
+          return leftNum - rightNum;
+        }
+        return String(left).localeCompare(String(right));
+      })
+      .map(function (key) {
+        return rows[key];
+      })
+      .filter(Boolean);
+  }
+
+  function normalizeDataMap(source) {
+    var result = {};
+    if (!source || typeof source !== "object") return result;
+    Object.keys(source).forEach(function (key) {
+      var item = clone(source[key]) || {};
+      item.id = item.id || key;
+      if (item.id) {
+        result[item.id] = item;
+      }
+    });
+    return result;
+  }
+
+  function applyResourceFloorToDoc(doc) {
+    var changed = false;
+    var floor = offlineConfig.testSaveResourceFloor || {};
+    var target = doc || {};
+    ["gold", "diamond", "energy", "exp"].forEach(function (key) {
+      var min = toNumber(floor[key], 0);
+      if (min > 0 && toNumber(target[key], 0) < min) {
+        target[key] = min;
+        changed = true;
+      }
+    });
+    return changed;
+  }
+
+  function applyResourceFloorToPayload(payload) {
+    if (!payload || typeof payload !== "object") return false;
+    var changed = applyResourceFloorToDoc(payload);
+    if (payload.doc && typeof payload.doc === "object") {
+      changed = applyResourceFloorToDoc(payload.doc) || changed;
+    }
+    return changed;
+  }
+
+  function buildSeededTeam(heroIds, heroRows) {
+    var indexById = {};
+    var team = { 0: -1, 1: -1, 2: -1, 3: -1 };
+    heroRows.forEach(function (row, index) {
+      if (row && row.id) {
+        indexById[row.id] = index;
+      }
+    });
+    for (var i = 0; i < 4; i += 1) {
+      var heroId = heroIds[i];
+      if (heroId && typeof indexById[heroId] === "number") {
+        team[i] = indexById[heroId];
+      }
+    }
+    return team;
+  }
+
+  function getTeamIdsFromPayload(team, heroRows, heroMap) {
+    var ids = [];
+    if (!team || typeof team !== "object") return ids;
+    Object.keys(team)
+      .sort()
+      .forEach(function (slot) {
+        var row = heroRows[team[slot]];
+        if (row && row.id && heroMap[row.id] && ids.indexOf(row.id) < 0) {
+          ids.push(row.id);
+        }
+      });
+    return ids;
+  }
+
+  function buildSeededProgression(payload) {
+    var next = clone(payload || {});
+    var heroRows = getExcelRows("hero_list");
+    var vehicleRows = getExcelRows("vehicle_list");
+    var heroMap = normalizeDataMap(next.hero);
+    var vehicleMap = normalizeDataMap(next.vehicle);
+    var changed = false;
+    var targetChapterIndex = getTargetChapterIndex();
+    var targetStageIndex = getChapterStageStart(targetChapterIndex);
+
+    if (toNumber(next.chapterIndex, 0) < targetChapterIndex) {
+      next.chapterIndex = targetChapterIndex;
+      changed = true;
+    }
+    if (toNumber(next.stageIndex, 0) < targetStageIndex) {
+      next.stageIndex = targetStageIndex;
+      changed = true;
+    }
+
+    changed = applyResourceFloorToPayload(next) || changed;
+
+    var heroIds = Object.keys(heroMap);
+    heroRows.forEach(function (row) {
+      if (row && row.id && heroIds.length < 4 && heroIds.indexOf(row.id) < 0) {
+        heroIds.push(row.id);
+      }
+    });
+    heroIds = heroIds.slice(0, 4);
+    heroIds.forEach(function (id) {
+      var hero = heroMap[id] || { id: id };
+      if (toNumber(hero.star, 0) < 1) {
+        hero.star = 1;
+        changed = true;
+      }
+      if (toNumber(hero.lvl, 1) < 12) {
+        hero.lvl = 12;
+        changed = true;
+      }
+      if (typeof hero.part === "undefined") {
+        hero.part = 0;
+        changed = true;
+      }
+      heroMap[id] = hero;
+    });
+    next.hero = heroMap;
+
+    var vehicleIds = Object.keys(vehicleMap);
+    vehicleRows.forEach(function (row) {
+      if (row && row.id && vehicleIds.length < 2 && vehicleIds.indexOf(row.id) < 0) {
+        vehicleIds.push(row.id);
+      }
+    });
+    vehicleIds = vehicleIds.slice(0, 2);
+    vehicleIds.forEach(function (id) {
+      var vehicle = vehicleMap[id] || { id: id };
+      if (toNumber(vehicle.star, 0) < 1) {
+        vehicle.star = 1;
+        changed = true;
+      }
+      if (toNumber(vehicle.atk, 0) < 10) {
+        vehicle.atk = 10;
+        changed = true;
+      }
+      if (toNumber(vehicle.hp, 0) < 10) {
+        vehicle.hp = 10;
+        changed = true;
+      }
+      if (toNumber(vehicle.skill, 0) < 4) {
+        vehicle.skill = 4;
+        changed = true;
+      }
+      if (typeof vehicle.part === "undefined") {
+        vehicle.part = 0;
+        changed = true;
+      }
+      vehicleMap[id] = vehicle;
+    });
+    next.vehicle = vehicleMap;
+
+    var teamIds = getTeamIdsFromPayload(next.team, heroRows, heroMap);
+    heroIds.forEach(function (heroId) {
+      if (teamIds.length < 4 && teamIds.indexOf(heroId) < 0) {
+        teamIds.push(heroId);
+      }
+    });
+    var seededTeam = buildSeededTeam(teamIds.slice(0, 4), heroRows);
+    if (JSON.stringify(next.team || {}) !== JSON.stringify(seededTeam)) {
+      next.team = seededTeam;
+      changed = true;
+    }
+
+    if (toNumber(next.vehicleIndex, -1) < 0 || !vehicleIds[toNumber(next.vehicleIndex, 0)]) {
+      next.vehicleIndex = 0;
+      changed = true;
+    }
+
+    var vehicleLink = assign({ 0: 1, 1: vehicleIds[1] ? 1 : 0, 2: 0 }, clone(next.vehicleLink || {}));
+    vehicleLink[0] = 1;
+    if (!vehicleIds[1]) {
+      vehicleLink[1] = 0;
+    }
+    if (JSON.stringify(next.vehicleLink || {}) !== JSON.stringify(vehicleLink)) {
+      next.vehicleLink = vehicleLink;
+      changed = true;
+    }
+
+    return {
+      changed: changed,
+      payload: next,
+      heroIds: heroIds,
+      vehicleIds: vehicleIds,
+      targetChapterIndex: targetChapterIndex,
+      targetStageIndex: targetStageIndex,
+    };
+  }
+
+  function persistProfileTestSave(summary) {
+    var profile = ensureProfile();
+    profile.testSave = assign(profile.testSave || {}, summary || {});
+    profile.testSave.lastAppliedAt = now();
+    saveJson("profile", profile);
+  }
+
+  function maybeLogTestSave(result) {
+    if (!result || !result.changed) return;
+    var signature = [
+      result.payload.chapterIndex,
+      result.payload.stageIndex,
+      Object.keys(result.payload.hero || {}).length,
+      Object.keys(result.payload.vehicle || {}).length,
+    ].join(":");
+    if (runtimeState.lastTestSaveSignature === signature) return;
+    runtimeState.lastTestSaveSignature = signature;
+    persistProfileTestSave({
+      enabled: true,
+      chapter: getDisplayedChapterNumber(result.payload.chapterIndex),
+      stageIndex: result.payload.stageIndex,
+    });
+    logRuntime("progression", "已应用第10章测试存档", {
+      chapter: getDisplayedChapterNumber(result.payload.chapterIndex),
+      stage: getStageDisplayName(result.payload.stageIndex),
+      heroes: Object.keys(result.payload.hero || {}).length,
+      vehicles: Object.keys(result.payload.vehicle || {}).length,
+    });
+  }
+
+  function extractPcPayload(pc) {
+    return {
+      chapterIndex: toNumber(pc.chapterIndex, 0),
+      stageIndex: toNumber(pc.stageIndex, 0),
+      hero: clone(pc.heroTable || {}),
+      vehicle: clone(pc.vehicleTable || {}),
+      team: clone(pc.team || {}),
+      vehicleIndex: toNumber(pc.vehicleIndex, 0),
+      vehicleLink: clone(pc.vehicleLink || {}),
+      chapterBoxOpen: clone(pc.chapterBoxOpen || {}),
+      difficultyBoxOpen: clone(pc.difficultyBoxOpen || {}),
+    };
+  }
+
+  function applyPcSeedToRuntime(pc, result) {
+    if (!pc || !result || !result.changed) return false;
+    Object.keys(result.payload.hero || {}).forEach(function (id) {
+      if (pc.setHero) {
+        pc.setHero(result.payload.hero[id]);
+      } else if (pc.heroTable) {
+        pc.heroTable[id] = clone(result.payload.hero[id]);
+      }
+    });
+    Object.keys(result.payload.vehicle || {}).forEach(function (id) {
+      if (pc.setVehicle) {
+        pc.setVehicle(result.payload.vehicle[id]);
+      } else if (pc.vehicleTable) {
+        pc.vehicleTable[id] = clone(result.payload.vehicle[id]);
+      }
+    });
+    pc.chapterIndex = result.payload.chapterIndex;
+    pc.stageIndex = result.payload.stageIndex;
+    pc.team = clone(result.payload.team || {});
+    pc.vehicleIndex = result.payload.vehicleIndex;
+    pc.vehicleLink = clone(result.payload.vehicleLink || {});
+    pc.chapterBoxOpen = clone(result.payload.chapterBoxOpen || {});
+    pc.difficultyBoxOpen = clone(result.payload.difficultyBoxOpen || {});
+    maybeLogTestSave(result);
+    return true;
+  }
+
+  function writeUserDataRecord(key, value) {
+    try {
+      if (window.cc && cc.sys && cc.sys.localStorage) {
+        cc.sys.localStorage.setItem(key, JSON.stringify(value));
+        return;
+      }
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch (err) {
+      console.warn("offline writeUserDataRecord failed", key, err);
+    }
+  }
+
   function walkNodes(node, visit) {
     if (!node) return;
     visit(node);
@@ -661,12 +1009,16 @@
   }
 
   function buildOfflineRankList() {
+    var chapterNumber = 1;
+    if (window.pc && pc.getChapterIndex) {
+      chapterNumber = getDisplayedChapterNumber(pc.getChapterIndex());
+    }
     return [
       {
         rank: 1,
         name: getOfflineUserName(),
         avatarUrl: getOfflineHeadUrl(),
-        score: "第" + (window.pc && pc.getChapterIndex ? pc.getChapterIndex() || 1 : 1) + "章",
+        score: "第" + chapterNumber + "章",
       },
     ];
   }
@@ -920,6 +1272,7 @@
     if (originalSetOnlineData) {
       user.setOnlineData = function (payload) {
         var next = clone(payload || {});
+        applyResourceFloorToPayload(next);
         assign(next, buildSignPayload());
         var mail = ensureMailState();
         next.mailList = clone(mail.list);
@@ -1044,6 +1397,75 @@
     return true;
   }
 
+  function patchUserDataMgr() {
+    var UserDataMgr = safeRequire("userDataMgr");
+    if (!UserDataMgr || !UserDataMgr.getInstance) return false;
+    var instance = UserDataMgr.getInstance();
+    if (!instance || instance.__offlineSingleplayerPatched) return false;
+
+    var originalGetUserData = instance.getUserData && instance.getUserData.bind(instance);
+    var originalSetUserDocInfo = instance.setUserDocInfo && instance.setUserDocInfo.bind(instance);
+
+    function ensureTestingDoc(key, data) {
+      var next = clone(data || {});
+      next.doc = next.doc || {};
+      if (applyResourceFloorToDoc(next.doc)) {
+        writeUserDataRecord(key, next);
+        logRuntime("progression", "已补齐第10章测试资源", {
+          gold: next.doc.gold || 0,
+          diamond: next.doc.diamond || 0,
+          energy: next.doc.energy || 0,
+        });
+      }
+      return next;
+    }
+
+    if (originalGetUserData) {
+      instance.getUserData = function (key) {
+        return ensureTestingDoc(key, originalGetUserData(key));
+      };
+    }
+
+    if (originalSetUserDocInfo) {
+      instance.setUserDocInfo = function (key, payload) {
+        return ensureTestingDoc(key, originalSetUserDocInfo(key, payload));
+      };
+    }
+
+    instance.__offlineSingleplayerPatched = true;
+    return true;
+  }
+
+  function patchPc() {
+    var pc = window.pc || safeRequire("pc");
+    if (!pc || pc.__offlineSingleplayerSavePatched) return false;
+
+    var originalSetOnlineData = pc.setOnlineData && pc.setOnlineData.bind(pc);
+
+    if (originalSetOnlineData) {
+      pc.setOnlineData = function (payload) {
+        var result = offlineConfig.testSaveEnabled ? buildSeededProgression(payload || {}) : { payload: payload || {} };
+        if (result.changed) {
+          maybeLogTestSave(result);
+        }
+        return originalSetOnlineData(result.payload);
+      };
+    }
+
+    if (
+      offlineConfig.testSaveEnabled &&
+      pc.heroTable &&
+      pc.vehicleTable &&
+      Array.isArray(pc.heroList) &&
+      Array.isArray(pc.vehicleList)
+    ) {
+      applyPcSeedToRuntime(pc, buildSeededProgression(extractPcPayload(pc)));
+    }
+
+    pc.__offlineSingleplayerSavePatched = true;
+    return true;
+  }
+
   function patchPvp() {
     var pvp = window.pvp || safeRequire("pvp");
     if (!pvp || pvp.__offlineSingleplayerPatched) return false;
@@ -1132,14 +1554,14 @@
     UserInfoMenu.prototype.initStatus = function () {
       this.refresh();
       if (this.advNum) {
-        this.advNum.string = window.pc && pc.getChapterIndex ? pc.getChapterIndex() || 1 : 1;
+        this.advNum.string = String(window.pc && pc.getChapterIndex ? getDisplayedChapterNumber(pc.getChapterIndex()) : 1);
       }
       if (this.pvpBoard) {
         this.pvpBoard.active = true;
         setNodeLabel(this.pvpBoard.getChildByName("n"), "单机进度");
         setNodeLabel(
           this.pvpBoard.getChildByName("v"),
-          "已推进至 第" + (window.pc && pc.getChapterIndex ? pc.getChapterIndex() || 1 : 1) + "章"
+          "已推进至 第" + (window.pc && pc.getChapterIndex ? getDisplayedChapterNumber(pc.getChapterIndex()) : 1) + "章"
         );
         var parent = this.pvpBoard.getParent && this.pvpBoard.getParent();
         if (parent && parent.children) {
@@ -1304,9 +1726,11 @@
     patched = patchSdk() || patched;
     patched = patchNativeSdk() || patched;
     patched = patchUser() || patched;
+    patched = patchUserDataMgr() || patched;
     patched = patchTask() || patched;
     patched = patchShop() || patched;
     patched = patchSocial() || patched;
+    patched = patchPc() || patched;
     patched = patchPvp() || patched;
     patched = patchQuickMatch() || patched;
     patched = patchUserInfoMenu() || patched;
@@ -1329,8 +1753,10 @@
       window.user.__offlineSingleplayerPatched &&
       window.task.__offlineSingleplayerPatched &&
       window.shop.__offlineSingleplayerPatched &&
+      (!safeRequire("userDataMgr") || (safeRequire("userDataMgr").getInstance && safeRequire("userDataMgr").getInstance().__offlineSingleplayerPatched)) &&
       window.hg &&
       window.hg.__offlineSingleplayerPatched &&
+      (!(window.pc || safeRequire("pc")) || (window.pc || safeRequire("pc")).__offlineSingleplayerSavePatched) &&
       (!(window.pvp || safeRequire("pvp")) || (window.pvp || safeRequire("pvp")).__offlineSingleplayerPatched) &&
       (!(window.quickMatch || safeRequire("quickMatch")) || (window.quickMatch || safeRequire("quickMatch")).__offlineSingleplayerPatched) &&
       (!safeRequire("UserInfoMenu") || safeRequire("UserInfoMenu").prototype.__offlineSingleplayerPatched) &&
