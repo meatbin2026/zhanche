@@ -174,6 +174,43 @@
     }
   }
 
+  function walkNodes(node, visit) {
+    if (!node) return;
+    visit(node);
+    var children = node.children || [];
+    for (var i = 0; i < children.length; i += 1) {
+      walkNodes(children[i], visit);
+    }
+  }
+
+  function setNodeLabel(node, value) {
+    if (!node || !window.cc) return;
+    var label = node.getComponent && node.getComponent(cc.Label);
+    if (label) {
+      label.string = value;
+      return;
+    }
+    var richText = node.getComponent && node.getComponent(cc.RichText);
+    if (richText) {
+      richText.string = value;
+    }
+  }
+
+  function rewriteMenuLabels(root) {
+    walkNodes(root, function (node) {
+      if (!node || !node.getComponent || !window.cc) return;
+      var label = node.getComponent(cc.Label);
+      if (!label || !label.string) return;
+      if (label.string.indexOf("好友") >= 0 || label.string.indexOf("排行") >= 0) {
+        label.string = "本地进度";
+      } else if (label.string.indexOf("荣誉") >= 0 || label.string.indexOf("竞技") >= 0) {
+        label.string = "单机模式";
+      } else if (label.string.indexOf("胜率") >= 0 || label.string.indexOf("分数") >= 0) {
+        label.string = "章节进度";
+      }
+    });
+  }
+
   function stubPlatformSdk() {
     if (!window.mpsdk) {
       window.mpsdk = {
@@ -285,7 +322,7 @@
         rank: 1,
         name: getOfflineUserName(),
         avatarUrl: getOfflineHeadUrl(),
-        score: window.pc && pc.getChapterIndex ? pc.getChapterIndex() || 1 : 1,
+        score: "第" + (window.pc && pc.getChapterIndex ? pc.getChapterIndex() || 1 : 1) + "章",
       },
     ];
   }
@@ -598,6 +635,7 @@
     var pvp = window.pvp || safeRequire("pvp");
     if (!pvp || pvp.__offlineSingleplayerPatched) return false;
     var originalGetModeData = pvp.getModeData && pvp.getModeData.bind(pvp);
+    var originalUpdateHonorIcon = pvp.updateHonorIcon && pvp.updateHonorIcon.bind(pvp);
 
     pvp.updateModeData = function (mode, cb) {
       var data = originalGetModeData ? originalGetModeData(mode) : null;
@@ -619,6 +657,14 @@
 
     pvp.getModeTime = function () {
       return 0;
+    };
+
+    pvp.getHonor = function () {
+      return 0;
+    };
+
+    pvp.getHonorIcon = function () {
+      return originalUpdateHonorIcon ? originalUpdateHonorIcon(0) : "";
     };
 
     pvp.__offlineSingleplayerPatched = true;
@@ -670,18 +716,78 @@
       return false;
     }
 
-    var originalInitStatus = UserInfoMenu.prototype.initStatus;
-
     UserInfoMenu.prototype.initStatus = function () {
-      if (originalInitStatus) {
-        originalInitStatus.apply(this, arguments);
+      this.refresh();
+      if (this.advNum) {
+        this.advNum.string = window.pc && pc.getChapterIndex ? pc.getChapterIndex() || 1 : 1;
       }
       if (this.pvpBoard) {
-        this.pvpBoard.active = false;
+        this.pvpBoard.active = true;
+        setNodeLabel(this.pvpBoard.getChildByName("n"), "单机进度");
+        setNodeLabel(
+          this.pvpBoard.getChildByName("v"),
+          "已推进至 第" + (window.pc && pc.getChapterIndex ? pc.getChapterIndex() || 1 : 1) + "章"
+        );
+        var parent = this.pvpBoard.getParent && this.pvpBoard.getParent();
+        if (parent && parent.children) {
+          for (var i = 0; i < parent.children.length; i += 1) {
+            if (parent.children[i] !== this.pvpBoard) {
+              parent.children[i].active = false;
+            }
+          }
+        }
       }
+      rewriteMenuLabels(this.node);
     };
 
     UserInfoMenu.prototype.__offlineSingleplayerPatched = true;
+    return true;
+  }
+
+  function patchFriendMenu() {
+    var FriendMenu = safeRequire("FriendMenu");
+    if (!FriendMenu || !FriendMenu.prototype || FriendMenu.prototype.__offlineSingleplayerPatched) {
+      return false;
+    }
+
+    FriendMenu.prototype.initStatus = function () {
+      if (this.scroll && this.scroll.node) {
+        this.scroll.node.active = true;
+      }
+      if (this.right) {
+        this.right.active = false;
+      }
+      this.initRankList(buildOfflineRankList());
+      rewriteMenuLabels(this.node);
+    };
+
+    FriendMenu.prototype.initRankList = function (ranks) {
+      var list = ranks && ranks.length ? ranks : buildOfflineRankList();
+      this.uiList = this.uiList || [this.item];
+      for (var index = 0; index < list.length; index += 1) {
+        var rank = list[index];
+        var item = this.uiList[index];
+        if (!item) {
+          item = this.uiList[index] = cc.instantiate(this.item);
+          this.layoutNode.addChild(item);
+        }
+        item.active = true;
+        var head = cc.find("headNode/head", item);
+        if (head) {
+          user.loadUserHead(head.getComponent(cc.Sprite), rank.avatarUrl);
+        }
+        setNodeLabel(cc.find("bar/name", item), rank.name || getOfflineUserName());
+        setNodeLabel(item.getChildByName("index"), "#" + (rank.rank || index + 1));
+        setNodeLabel(item.getChildByName("score"), rank.score || "第1章");
+      }
+      for (var i = list.length; i < this.uiList.length; i += 1) {
+        if (this.uiList[i]) this.uiList[i].active = false;
+      }
+      rewriteMenuLabels(this.node);
+    };
+
+    FriendMenu.prototype.updateOpenRender = function () {};
+    FriendMenu.prototype.__offlineSingleplayerPatched = true;
     return true;
   }
 
@@ -696,6 +802,7 @@
     patched = patchPvp() || patched;
     patched = patchQuickMatch() || patched;
     patched = patchUserInfoMenu() || patched;
+    patched = patchFriendMenu() || patched;
 
     if (
       window.net &&
@@ -713,6 +820,7 @@
       (!(window.pvp || safeRequire("pvp")) || (window.pvp || safeRequire("pvp")).__offlineSingleplayerPatched) &&
       (!(window.quickMatch || safeRequire("quickMatch")) || (window.quickMatch || safeRequire("quickMatch")).__offlineSingleplayerPatched) &&
       (!safeRequire("UserInfoMenu") || safeRequire("UserInfoMenu").prototype.__offlineSingleplayerPatched) &&
+      (!safeRequire("FriendMenu") || safeRequire("FriendMenu").prototype.__offlineSingleplayerPatched) &&
       installTimer
     ) {
       clearInterval(installTimer);
