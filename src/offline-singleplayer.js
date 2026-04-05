@@ -3,6 +3,7 @@
   var oneDayMs = 24 * 60 * 60 * 1000;
   var installTimer = null;
   var offlineNoticeText = "单机版不支持联网功能";
+  var adRewardDisabledNoticeText = "单机版暂时关闭广告奖励，页面流程会继续但不发奖";
   var offlineConfig = {
     adRewardsEnabled: false,
     maxLogs: 20,
@@ -635,36 +636,44 @@
 
     function interceptRoute(route, args, cb) {
       if (route === "updateSignData") {
+        logRuntime("route", "签到数据改为本地读取", buildSignPayload());
         if (cb) cb(0, buildSignPayload());
         return true;
       }
       if (route === "updateDailyTask") {
+        logRuntime("route", "每日任务改为本地读取", buildDailyTaskPayload());
         if (cb) cb(0, buildDailyTaskPayload());
         return true;
       }
       if (route === "updateOnlineBox") {
+        logRuntime("route", "在线宝箱改为本地读取", buildOnlineBoxPayload());
         if (cb) cb(0, buildOnlineBoxPayload());
         return true;
       }
       if (route === "getMailInfoTable") {
+        logRuntime("route", "邮件详情表改为本地读取", { ids: args && args.ids ? args.ids.length : 0 });
         if (cb) cb(0, { mailTable: buildMailTable(args && args.ids) });
         return true;
       }
       if (route === "getMail") {
         var mailState = ensureMailState();
         var mail = mailState.table[args && args.id];
+        logRuntime("route", "邮件正文改为本地读取", { id: args && args.id ? args.id : "" });
         if (cb) cb(0, { mail: clone(mail || {}) });
         return true;
       }
       if (route === "getGiftCode") {
+        logRuntime("route", "礼包码功能在单机版中关闭");
         if (cb) cb(0, { res: "no_code" });
         return true;
       }
       if (route === "getBattleServer" || route === "getPvpData") {
+        logRuntime("route", "联网/PVP请求已拒绝", { route: route });
         if (cb) cb(999, { msg: "单机版不支持联网功能" });
         return true;
       }
       if (route === "setGuest") {
+        logRuntime("route", "访客登录改为本地 openId");
         if (cb) cb(0, { openId: localStorage.getItem("userId") || "offline-openid" });
         return true;
       }
@@ -688,6 +697,11 @@
     if (originalUpdateData) {
       net.updateData = function (payload, cb) {
         var request = clone(payload || {});
+        logRuntime("updateData", "收到本地数据更新请求", {
+          addKeys: request.add ? Object.keys(request.add) : [],
+          setKeys: request.set ? Object.keys(request.set) : [],
+          mailId: request.mail && request.mail.id ? request.mail.id : "",
+        });
         consumeRewardBlock(request);
 
         if (request.mail && window.user && Array.isArray(window.user.mailList)) {
@@ -758,6 +772,12 @@
               });
             }
           }
+          logRuntime("updateData", err ? "本地数据更新失败" : "本地数据更新完成", {
+            err: err || 0,
+            signCount: merged && typeof merged.signCount !== "undefined" ? merged.signCount : null,
+            onlineBoxIndex: merged && typeof merged.onlineBoxIndex !== "undefined" ? merged.onlineBoxIndex : null,
+            hasMailList: !!(merged && merged.mailList),
+          });
           if (cb) cb(err, merged);
         });
       };
@@ -788,7 +808,7 @@
       }
       if (!offlineConfig.adRewardsEnabled) {
         armRewardBlock("video", tag);
-        showOfflineNotice("单机版暂时关闭广告奖励");
+        showOfflineNotice(adRewardDisabledNoticeText);
       }
       setTimeout(function () {
         if (cb) cb(0, window.VIDEO_FREE || 1);
@@ -799,7 +819,7 @@
       logRuntime("sdk", "showShare", { tag: tag || "" });
       if (!offlineConfig.adRewardsEnabled) {
         armRewardBlock("share", tag);
-        showOfflineNotice("单机版暂时关闭广告奖励");
+        showOfflineNotice(adRewardDisabledNoticeText);
       }
       setTimeout(function () {
         if (cb) cb(0, window.SHARE_FREE || 2);
@@ -824,7 +844,7 @@
       logRuntime("nativeSdk", "showVideo", { tag: tag || "" });
       if (!offlineConfig.adRewardsEnabled) {
         armRewardBlock("native-video", tag);
-        showOfflineNotice("单机版暂时关闭广告奖励");
+        showOfflineNotice(adRewardDisabledNoticeText);
       }
       setTimeout(function () {
         if (cb) cb(true, tag);
@@ -835,7 +855,7 @@
       logRuntime("nativeSdk", "share", { tag: tag || "", text: text || "" });
       if (!offlineConfig.adRewardsEnabled) {
         armRewardBlock("native-share", tag);
-        showOfflineNotice("单机版暂时关闭广告奖励");
+        showOfflineNotice(adRewardDisabledNoticeText);
       }
       setTimeout(function () {
         if (cb) cb(true, text || tag);
@@ -895,6 +915,7 @@
         daily.ct = daily.ct || {};
         daily.ct[key] = (daily.ct[key] || 0) + delta;
         saveJson("daily-task", daily);
+        logRuntime("task", "每日任务计数更新", { key: key, delta: delta, total: daily.ct[key] });
         return originalAddDailyTaskCt(key, count);
       };
     }
@@ -905,6 +926,7 @@
         daily.status = daily.status || {};
         daily.status[key] = value;
         saveJson("daily-task", daily);
+        logRuntime("task", "每日任务状态更新", { key: key, value: value });
         return originalSetDailyTaskStatus(key, value);
       };
     }
