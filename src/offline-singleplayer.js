@@ -184,7 +184,12 @@
   }
 
   function setNodeLabel(node, value) {
-    if (!node || !window.cc) return;
+    if (!node) return;
+    if (typeof node.string !== "undefined") {
+      node.string = value;
+      return;
+    }
+    if (!window.cc) return;
     var label = node.getComponent && node.getComponent(cc.Label);
     if (label) {
       label.string = value;
@@ -207,6 +212,13 @@
         label.string = "单机模式";
       } else if (label.string.indexOf("胜率") >= 0 || label.string.indexOf("分数") >= 0) {
         label.string = "章节进度";
+      } else if (
+        label.string.indexOf("关注") >= 0 ||
+        label.string.indexOf("订阅") >= 0 ||
+        label.string.indexOf("桌面") >= 0 ||
+        label.string.indexOf("侧边栏") >= 0
+      ) {
+        label.string = "单机功能";
       }
     });
   }
@@ -521,6 +533,7 @@
     assign(user, buildSignPayload());
     user.mailList = clone(ensureMailState().list);
     user.mailInfoTable = clone(ensureMailState().table);
+    user.feedSubscribeId = "";
 
     user.__offlineSingleplayerPatched = true;
     return true;
@@ -791,6 +804,100 @@
     return true;
   }
 
+  function patchFavoriteMenu() {
+    var FavoriteMenu = safeRequire("FavoriteMenu");
+    if (!FavoriteMenu || !FavoriteMenu.prototype || FavoriteMenu.prototype.__offlineSingleplayerPatched) {
+      return false;
+    }
+
+    FavoriteMenu.prototype.initStatus = function () {
+      if (this.wxNode) this.wxNode.active = false;
+      if (this.qqNode) this.qqNode.active = false;
+      if (this.blNode) this.blNode.active = false;
+      if (this.finger) {
+        this.finger.stopAllActions && this.finger.stopAllActions();
+        this.finger.active = false;
+      }
+      setNodeLabel(this.myTitleLabel, "单机说明");
+      setNodeLabel(this.myBtnLabel, "知道了");
+      setNodeLabel(
+        this.myInfoLabel,
+        "当前版本已关闭关注、分享和平台订阅奖励，只保留本地单机游玩。"
+      );
+      rewriteMenuLabels(this.node);
+    };
+
+    FavoriteMenu.prototype.onAdd = function () {
+      showOfflineNotice("单机版已关闭关注与分享奖励");
+      this.close && this.close();
+    };
+
+    FavoriteMenu.prototype.__offlineSingleplayerPatched = true;
+    return true;
+  }
+
+  function patchPlatformPrompts() {
+    var changed = false;
+
+    if (window.initDesktopIcon && !window.initDesktopIcon.__offlineSingleplayerPatched) {
+      window.initDesktopIcon = function (node) {
+        if (!node) return;
+        node.active = false;
+        node.stopAllActions && node.stopAllActions();
+        node.onTouch = function () {
+          showOfflineNotice("单机版已关闭桌面快捷方式奖励");
+        };
+      };
+      window.initDesktopIcon.__offlineSingleplayerPatched = true;
+      changed = true;
+    }
+
+    if (window.initSideBarIcon && !window.initSideBarIcon.__offlineSingleplayerPatched) {
+      window.initSideBarIcon = function (node) {
+        if (!node) return;
+        node.active = false;
+        node.stopAllActions && node.stopAllActions();
+        node.onTouch = function () {
+          showOfflineNotice("单机版已关闭侧边栏奖励");
+        };
+      };
+      window.initSideBarIcon.__offlineSingleplayerPatched = true;
+      changed = true;
+    }
+
+    if (window.tt && !window.tt.__offlineSingleplayerPatched) {
+      window.tt.requestFeedSubscribe = function (options) {
+        if (options && options.fail) {
+          options.fail({ errMsg: "offline disabled" });
+        }
+      };
+      window.tt.checkFeedSubscribeStatus = function (options) {
+        if (options && options.success) {
+          options.success({ status: true });
+        }
+      };
+      window.tt.addShortcut = function (options) {
+        if (options && options.fail) {
+          options.fail({ errMsg: "offline disabled" });
+        }
+      };
+      window.tt.checkShortcut = function (options) {
+        if (options && options.success) {
+          options.success({ status: { exist: true } });
+        }
+      };
+      window.tt.navigateToScene = function (options) {
+        if (options && options.fail) {
+          options.fail({ errMsg: "offline disabled" });
+        }
+      };
+      window.tt.__offlineSingleplayerPatched = true;
+      changed = true;
+    }
+
+    return changed;
+  }
+
   function tryInstallRuntimePatches() {
     var patched = false;
     patched = patchNet() || patched;
@@ -803,6 +910,8 @@
     patched = patchQuickMatch() || patched;
     patched = patchUserInfoMenu() || patched;
     patched = patchFriendMenu() || patched;
+    patched = patchFavoriteMenu() || patched;
+    patched = patchPlatformPrompts() || patched;
 
     if (
       window.net &&
@@ -821,6 +930,9 @@
       (!(window.quickMatch || safeRequire("quickMatch")) || (window.quickMatch || safeRequire("quickMatch")).__offlineSingleplayerPatched) &&
       (!safeRequire("UserInfoMenu") || safeRequire("UserInfoMenu").prototype.__offlineSingleplayerPatched) &&
       (!safeRequire("FriendMenu") || safeRequire("FriendMenu").prototype.__offlineSingleplayerPatched) &&
+      (!safeRequire("FavoriteMenu") || safeRequire("FavoriteMenu").prototype.__offlineSingleplayerPatched) &&
+      (!window.initDesktopIcon || window.initDesktopIcon.__offlineSingleplayerPatched) &&
+      (!window.initSideBarIcon || window.initSideBarIcon.__offlineSingleplayerPatched) &&
       installTimer
     ) {
       clearInterval(installTimer);
