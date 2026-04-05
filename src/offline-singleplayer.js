@@ -3,6 +3,20 @@
   var oneDayMs = 24 * 60 * 60 * 1000;
   var installTimer = null;
   var offlineNoticeText = "单机版不支持联网功能";
+  var offlineConfig = {
+    adRewardsEnabled: false,
+    maxLogs: 20,
+    debugPanelVisible: false,
+  };
+  var runtimeState = {
+    logs: [],
+    patchState: {},
+    pendingRewardBlock: null,
+    debugPanel: null,
+    debugBody: null,
+    debugVisible: false,
+    debugInstalled: false,
+  };
 
   function now() {
     return Date.now();
@@ -20,6 +34,240 @@
 
   function msUntilNextReset() {
     return Math.max(0, nextResetAt() - now());
+  }
+
+  function isDebugQueryEnabled() {
+    try {
+      return !!(window.location && /(?:^|[?&])debug=1(?:&|$)/.test(window.location.search || ""));
+    } catch (err) {
+      return false;
+    }
+  }
+
+  function formatClockTime(timestamp) {
+    try {
+      return new Date(timestamp).toLocaleTimeString("zh-CN", { hour12: false });
+    } catch (err) {
+      return String(timestamp);
+    }
+  }
+
+  function trimText(value, maxLength) {
+    var text = value == null ? "" : String(value);
+    return text.length > maxLength ? text.slice(0, maxLength - 1) + "…" : text;
+  }
+
+  function snapshotPatchState() {
+    var patchState = runtimeState.patchState;
+    patchState.net = !!(window.net && window.net.__offlineSingleplayerPatched);
+    patchState.sdk = !!(window.sdk && window.sdk.__offlineSingleplayerPatched);
+    patchState.nativeSdk = !!(window.nativeSdk && window.nativeSdk.__offlineSingleplayerPatched);
+    patchState.user = !!(window.user && window.user.__offlineSingleplayerPatched);
+    patchState.task = !!(window.task && window.task.__offlineSingleplayerPatched);
+    patchState.shop = !!(window.shop && window.shop.__offlineSingleplayerPatched);
+    patchState.social = !!(window.hg && window.hg.__offlineSingleplayerPatched);
+    patchState.pvp = !!(
+      !(window.pvp || safeRequire("pvp")) || (window.pvp || safeRequire("pvp")).__offlineSingleplayerPatched
+    );
+    patchState.quickMatch = !!(
+        !(window.quickMatch || safeRequire("quickMatch")) ||
+        (window.quickMatch || safeRequire("quickMatch")).__offlineSingleplayerPatched
+    );
+    patchState.userInfoMenu = !!(
+      !safeRequire("UserInfoMenu") || safeRequire("UserInfoMenu").prototype.__offlineSingleplayerPatched
+    );
+    patchState.friendMenu = !!(
+      !safeRequire("FriendMenu") || safeRequire("FriendMenu").prototype.__offlineSingleplayerPatched
+    );
+    patchState.favoriteMenu = !!(
+      !safeRequire("FavoriteMenu") || safeRequire("FavoriteMenu").prototype.__offlineSingleplayerPatched
+    );
+    patchState.desktopIcon = !!(!window.initDesktopIcon || window.initDesktopIcon.__offlineSingleplayerPatched);
+    patchState.sideBarIcon = !!(!window.initSideBarIcon || window.initSideBarIcon.__offlineSingleplayerPatched);
+    return patchState;
+  }
+
+  function logRuntime(type, message, details) {
+    var entry = {
+      at: now(),
+      type: type,
+      message: trimText(message, 120),
+      details: details ? trimText(JSON.stringify(details), 180) : "",
+    };
+    runtimeState.logs.unshift(entry);
+    if (runtimeState.logs.length > offlineConfig.maxLogs) {
+      runtimeState.logs.length = offlineConfig.maxLogs;
+    }
+    refreshDebugPanel();
+    return entry;
+  }
+
+  function armRewardBlock(source, tag) {
+    runtimeState.pendingRewardBlock = {
+      source: source,
+      tag: tag || "",
+      createdAt: now(),
+      expiresAt: now() + 10000,
+    };
+    logRuntime("reward-off", "广告奖励已关闭", { source: source, tag: tag || "" });
+    refreshDebugPanel();
+  }
+
+  function consumeRewardBlock(request) {
+    var block = runtimeState.pendingRewardBlock;
+    if (!block) return false;
+    if (block.expiresAt < now()) {
+      runtimeState.pendingRewardBlock = null;
+      refreshDebugPanel();
+      return false;
+    }
+    if (!request || !request.add || !Object.keys(request.add).length) {
+      return false;
+    }
+    logRuntime("reward-block", "已拦截一次广告奖励发放", {
+      source: block.source,
+      tag: block.tag || "",
+      add: request.add,
+    });
+    request.add = {};
+    runtimeState.pendingRewardBlock = null;
+    refreshDebugPanel();
+    return true;
+  }
+
+  function getCurrentSceneName() {
+    try {
+      var scene = window.cc && cc.director && cc.director.getScene && cc.director.getScene();
+      return scene && scene.name ? scene.name : "-";
+    } catch (err) {
+      return "-";
+    }
+  }
+
+  function buildDebugSnapshot() {
+    snapshotPatchState();
+    var patchLines = Object.keys(runtimeState.patchState).map(function (key) {
+      return key + ":" + (runtimeState.patchState[key] ? "on" : "off");
+    });
+    var pending = runtimeState.pendingRewardBlock
+      ? runtimeState.pendingRewardBlock.source + (runtimeState.pendingRewardBlock.tag ? "(" + runtimeState.pendingRewardBlock.tag + ")" : "")
+      : "none";
+    return [
+      "Offline Debug Panel",
+      "scene: " + getCurrentSceneName(),
+      "offline: on",
+      "adRewards: " + (offlineConfig.adRewardsEnabled ? "enabled" : "disabled"),
+      "pendingRewardBlock: " + pending,
+      "sign: " + (ensureSignState().signCount || 0),
+      "dailyKeys: " + Object.keys(ensureDailyTaskState().status || {}).length,
+      "mail: " + ensureMailState().list.length,
+      "onlineBox: #" + (ensureOnlineBoxState().index || 0),
+      "",
+      "patches:",
+      patchLines.join(" | "),
+      "",
+      "recent logs:",
+    ].concat(
+      runtimeState.logs.length
+        ? runtimeState.logs.map(function (entry) {
+            return (
+              "[" +
+              formatClockTime(entry.at) +
+              "] " +
+              entry.type +
+              " " +
+              entry.message +
+              (entry.details ? " " + entry.details : "")
+            );
+          })
+        : ["(empty)"]
+    );
+  }
+
+  function refreshDebugPanel() {
+    if (!runtimeState.debugBody) return;
+    runtimeState.debugBody.textContent = buildDebugSnapshot().join("\n");
+  }
+
+  function setDebugVisible(visible) {
+    offlineConfig.debugPanelVisible = !!visible;
+    runtimeState.debugVisible = !!visible;
+    ensureDebugPanel();
+    if (runtimeState.debugPanel) {
+      runtimeState.debugPanel.style.display = visible ? "block" : "none";
+    }
+    refreshDebugPanel();
+  }
+
+  function ensureDebugPanel() {
+    if (typeof document === "undefined" || runtimeState.debugPanel) return;
+    if (!document.body) {
+      setTimeout(ensureDebugPanel, 50);
+      return;
+    }
+    var panel = document.createElement("div");
+    panel.id = "offline-debug-panel";
+    panel.style.cssText =
+      "position:fixed;top:8px;right:8px;z-index:999999;max-width:320px;max-height:70vh;" +
+      "overflow:auto;padding:10px 12px;background:rgba(5,8,14,0.9);color:#d7f8df;" +
+      "border:1px solid rgba(130,230,160,0.45);border-radius:8px;font:12px/1.45 Menlo,Monaco,monospace;" +
+      "box-shadow:0 12px 28px rgba(0,0,0,0.35);display:none;white-space:pre-wrap;";
+
+    var controls = document.createElement("div");
+    controls.style.cssText = "display:flex;gap:8px;margin-bottom:8px;";
+
+    function makeButton(label, onClick) {
+      var button = document.createElement("button");
+      button.type = "button";
+      button.textContent = label;
+      button.style.cssText =
+        "padding:4px 8px;border:1px solid rgba(130,230,160,0.45);background:#182330;color:#d7f8df;" +
+        "border-radius:4px;cursor:pointer;font:12px Menlo,Monaco,monospace;";
+      button.addEventListener("click", onClick);
+      return button;
+    }
+
+    controls.appendChild(
+      makeButton("Hide", function () {
+        setDebugVisible(false);
+      })
+    );
+    controls.appendChild(
+      makeButton("Clear Logs", function () {
+        runtimeState.logs = [];
+        refreshDebugPanel();
+      })
+    );
+
+    var body = document.createElement("pre");
+    body.style.cssText = "margin:0;white-space:pre-wrap;word-break:break-word;";
+
+    panel.appendChild(controls);
+    panel.appendChild(body);
+    document.body.appendChild(panel);
+
+    runtimeState.debugPanel = panel;
+    runtimeState.debugBody = body;
+    refreshDebugPanel();
+    if (offlineConfig.debugPanelVisible) {
+      panel.style.display = "block";
+    }
+  }
+
+  function installDebugPanel() {
+    if (runtimeState.debugInstalled || typeof document === "undefined") return;
+    runtimeState.debugInstalled = true;
+    ensureDebugPanel();
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "`" || event.key === "~") {
+        setDebugVisible(!runtimeState.debugVisible);
+      }
+    });
+    setInterval(function () {
+      if (runtimeState.debugVisible) {
+        refreshDebugPanel();
+      }
+    }, 500);
   }
 
   function loadJson(key, fallback) {
@@ -307,8 +555,9 @@
 
   function showOfflineNotice(message) {
     var text = message || offlineNoticeText;
-    if (window.kit && kit.info) {
-      kit.info(text);
+    logRuntime("notice", text);
+    if (window.kit && window.kit.info) {
+      window.kit.info(text);
       return;
     }
     console.log(text);
@@ -402,6 +651,7 @@
     if (originalUpdateData) {
       net.updateData = function (payload, cb) {
         var request = clone(payload || {});
+        consumeRewardBlock(request);
 
         if (request.mail && window.user && Array.isArray(window.user.mailList)) {
           window.user.mailList = window.user.mailList.map(function (item) {
@@ -444,6 +694,10 @@
             }
           });
           saveJson("daily-task", daily);
+        }
+
+        if (request.add && !Object.keys(request.add).length) {
+          delete request.add;
         }
 
         return originalUpdateData(request, function (err, result) {
@@ -491,8 +745,13 @@
     };
 
     sdk.showVideo = function (tag, cb) {
-      if (window.task && window.task.addDailyTaskCt) {
+      logRuntime("sdk", "showVideo", { tag: tag || "" });
+      if (offlineConfig.adRewardsEnabled && window.task && window.task.addDailyTaskCt) {
         window.task.addDailyTaskCt("videoCount");
+      }
+      if (!offlineConfig.adRewardsEnabled) {
+        armRewardBlock("video", tag);
+        showOfflineNotice("单机版暂时关闭广告奖励");
       }
       setTimeout(function () {
         if (cb) cb(0, window.VIDEO_FREE || 1);
@@ -500,16 +759,53 @@
     };
 
     sdk.showShare = function (tag, cb) {
+      logRuntime("sdk", "showShare", { tag: tag || "" });
+      if (!offlineConfig.adRewardsEnabled) {
+        armRewardBlock("share", tag);
+        showOfflineNotice("单机版暂时关闭广告奖励");
+      }
       setTimeout(function () {
         if (cb) cb(0, window.SHARE_FREE || 2);
       }, 0);
     };
 
     sdk.useFree = function (tag, cb) {
+      logRuntime("sdk", "useFree", { tag: tag || "" });
       sdk.showVideo(tag, cb);
     };
 
     sdk.__offlineSingleplayerPatched = true;
+    return true;
+  }
+
+  function patchNativeSdk() {
+    if (!window.nativeSdk || window.nativeSdk.__offlineSingleplayerPatched) return false;
+
+    var nativeSdk = window.nativeSdk;
+
+    nativeSdk.showVideo = function (tag, cb) {
+      logRuntime("nativeSdk", "showVideo", { tag: tag || "" });
+      if (!offlineConfig.adRewardsEnabled) {
+        armRewardBlock("native-video", tag);
+        showOfflineNotice("单机版暂时关闭广告奖励");
+      }
+      setTimeout(function () {
+        if (cb) cb(true, tag);
+      }, 0);
+    };
+
+    nativeSdk.share = function (tag, text, cb) {
+      logRuntime("nativeSdk", "share", { tag: tag || "", text: text || "" });
+      if (!offlineConfig.adRewardsEnabled) {
+        armRewardBlock("native-share", tag);
+        showOfflineNotice("单机版暂时关闭广告奖励");
+      }
+      setTimeout(function () {
+        if (cb) cb(true, text || tag);
+      }, 0);
+    };
+
+    nativeSdk.__offlineSingleplayerPatched = true;
     return true;
   }
 
@@ -902,6 +1198,7 @@
     var patched = false;
     patched = patchNet() || patched;
     patched = patchSdk() || patched;
+    patched = patchNativeSdk() || patched;
     patched = patchUser() || patched;
     patched = patchTask() || patched;
     patched = patchShop() || patched;
@@ -913,14 +1210,18 @@
     patched = patchFavoriteMenu() || patched;
     patched = patchPlatformPrompts() || patched;
 
+    snapshotPatchState();
+
     if (
       window.net &&
       window.sdk &&
+      window.nativeSdk &&
       window.user &&
       window.task &&
       window.shop &&
       window.net.__offlineSingleplayerPatched &&
       window.sdk.__offlineSingleplayerPatched &&
+      window.nativeSdk.__offlineSingleplayerPatched &&
       window.user.__offlineSingleplayerPatched &&
       window.task.__offlineSingleplayerPatched &&
       window.shop.__offlineSingleplayerPatched &&
@@ -942,6 +1243,7 @@
     return patched;
   }
 
+  offlineConfig.debugPanelVisible = isDebugQueryEnabled();
   stubPlatformSdk();
   ensureProfile();
   ensureSignState();
@@ -960,6 +1262,7 @@
 
   window.__OFFLINE_SINGLEPLAYER__ = {
     enabled: true,
+    config: offlineConfig,
     now: now,
     todayKey: todayKey,
     loadJson: loadJson,
@@ -986,7 +1289,17 @@
       buildOfflineRankList: buildOfflineRankList,
     },
     runtime: {
+      logs: runtimeState.logs,
+      patchState: runtimeState.patchState,
       tryInstallRuntimePatches: tryInstallRuntimePatches,
+      snapshotPatchState: snapshotPatchState,
+      getSnapshot: buildDebugSnapshot,
+      setDebugVisible: setDebugVisible,
+      refreshDebugPanel: refreshDebugPanel,
     },
   };
+
+  snapshotPatchState();
+  installDebugPanel();
+  setDebugVisible(offlineConfig.debugPanelVisible);
 })();
