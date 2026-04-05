@@ -1,5 +1,13 @@
 (function () {
-  var storagePrefix = "offline_singleplayer:";
+  var storageRootPrefix = "offline_singleplayer:";
+  var activeSlotId = null;
+  var offlineInitialized = false;
+  var bootGateState = {
+    ready: false,
+    actualBoot: null,
+    pendingArgs: null,
+    installed: false,
+  };
   var oneDayMs = 24 * 60 * 60 * 1000;
   var installTimer = null;
   var offlineNoticeText = "单机版不支持联网功能";
@@ -16,6 +24,7 @@
     },
     maxLogs: 20,
     debugPanelVisible: false,
+    saveSlotCount: 3,
   };
   var runtimeState = {
     logs: [],
@@ -28,7 +37,22 @@
     cornerTapCount: 0,
     cornerTapUntil: 0,
     lastTestSaveSignature: "",
+    saveSelector: null,
+    saveSelectorBody: null,
   };
+
+  function getManagerStorageKey() {
+    return storageRootPrefix + "save-manager";
+  }
+
+  function getSlotStoragePrefix(slotId) {
+    return storageRootPrefix + "slot:" + slotId + ":";
+  }
+
+  function getActiveStoragePrefix() {
+    var slotId = activeSlotId || "slot-1";
+    return getSlotStoragePrefix(slotId);
+  }
 
   function now() {
     return Date.now();
@@ -67,6 +91,235 @@
   function trimText(value, maxLength) {
     var text = value == null ? "" : String(value);
     return text.length > maxLength ? text.slice(0, maxLength - 1) + "…" : text;
+  }
+
+  function formatDateTime(timestamp) {
+    if (!timestamp) return "未进入";
+    try {
+      return new Date(timestamp).toLocaleString("zh-CN", {
+        hour12: false,
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    } catch (err) {
+      return "未进入";
+    }
+  }
+
+  function parseJson(raw, fallback) {
+    try {
+      return raw ? JSON.parse(raw) : fallback;
+    } catch (err) {
+      return fallback;
+    }
+  }
+
+  function loadRootJson(key, fallback) {
+    try {
+      return parseJson(localStorage.getItem(storageRootPrefix + key), fallback);
+    } catch (err) {
+      console.warn("offline loadRootJson failed", key, err);
+      return fallback;
+    }
+  }
+
+  function saveRootJson(key, value) {
+    try {
+      localStorage.setItem(storageRootPrefix + key, JSON.stringify(value));
+    } catch (err) {
+      console.warn("offline saveRootJson failed", key, err);
+    }
+  }
+
+  function getSlotIds() {
+    var ids = [];
+    for (var index = 1; index <= offlineConfig.saveSlotCount; index += 1) {
+      ids.push("slot-" + index);
+    }
+    return ids;
+  }
+
+  function getSlotLabel(slotId) {
+    var num = Number(String(slotId || "").split("-")[1] || 1);
+    return "进度" + num;
+  }
+
+  function createDefaultSlotMeta(slotId) {
+    return {
+      id: slotId,
+      name: getSlotLabel(slotId),
+      used: false,
+      createdAt: 0,
+      updatedAt: 0,
+      chapter: offlineConfig.testSaveEnabled ? offlineConfig.testSaveChapter : 1,
+      stageName: offlineConfig.testSaveEnabled ? "测试进度" : "新手开局",
+    };
+  }
+
+  function hasLegacyOfflineKeys() {
+    var legacyKeys = ["profile", "sign", "daily-task", "online-box", "shop", "mail"];
+    try {
+      for (var i = 0; i < legacyKeys.length; i += 1) {
+        if (localStorage.getItem(storageRootPrefix + legacyKeys[i]) != null) {
+          return true;
+        }
+      }
+    } catch (err) {}
+    return false;
+  }
+
+  function slotHasScopedData(slotId) {
+    var prefix = getSlotStoragePrefix(slotId);
+    try {
+      for (var i = 0; i < localStorage.length; i += 1) {
+        var key = localStorage.key(i);
+        if (key && key.indexOf(prefix) === 0) {
+          return true;
+        }
+      }
+    } catch (err) {}
+    return false;
+  }
+
+  function migrateLegacyOfflineDataToSlot(slotId) {
+    var legacyKeys = ["profile", "sign", "daily-task", "online-box", "shop", "mail"];
+    var slotPrefix = getSlotStoragePrefix(slotId);
+    var migrated = false;
+    try {
+      legacyKeys.forEach(function (key) {
+        var raw = localStorage.getItem(storageRootPrefix + key);
+        if (raw != null && localStorage.getItem(slotPrefix + key) == null) {
+          localStorage.setItem(slotPrefix + key, raw);
+          migrated = true;
+        }
+      });
+    } catch (err) {
+      console.warn("offline migrateLegacyOfflineDataToSlot failed", slotId, err);
+    }
+    return migrated;
+  }
+
+  function ensureSaveManager() {
+    var manager = loadRootJson("save-manager", null);
+    var changed = false;
+    if (!manager || typeof manager !== "object" || !manager.slots) {
+      manager = {
+        currentSlotId: "slot-1",
+        slots: {},
+        migratedLegacy: false,
+      };
+      changed = true;
+    }
+
+    getSlotIds().forEach(function (slotId) {
+      if (!manager.slots[slotId]) {
+        manager.slots[slotId] = createDefaultSlotMeta(slotId);
+        changed = true;
+      }
+      if (slotHasScopedData(slotId) && !manager.slots[slotId].used) {
+        manager.slots[slotId].used = true;
+        manager.slots[slotId].createdAt = manager.slots[slotId].createdAt || now();
+        manager.slots[slotId].updatedAt = manager.slots[slotId].updatedAt || now();
+        changed = true;
+      }
+    });
+
+    if (!manager.currentSlotId || !manager.slots[manager.currentSlotId]) {
+      manager.currentSlotId = "slot-1";
+      changed = true;
+    }
+
+    if (!manager.migratedLegacy && hasLegacyOfflineKeys() && !slotHasScopedData("slot-1")) {
+      if (migrateLegacyOfflineDataToSlot("slot-1")) {
+        manager.slots["slot-1"].used = true;
+        manager.slots["slot-1"].createdAt = manager.slots["slot-1"].createdAt || now();
+        manager.slots["slot-1"].updatedAt = now();
+        changed = true;
+      }
+      manager.migratedLegacy = true;
+      changed = true;
+    }
+
+    if (changed) {
+      saveRootJson("save-manager", manager);
+    }
+    return manager;
+  }
+
+  function updateSlotMeta(slotId, patch) {
+    var manager = ensureSaveManager();
+    var slot = manager.slots[slotId] || createDefaultSlotMeta(slotId);
+    var next = patch || {};
+    Object.keys(next).forEach(function (key) {
+      slot[key] = next[key];
+    });
+    manager.slots[slotId] = slot;
+    saveRootJson("save-manager", manager);
+    return slot;
+  }
+
+  function updateActiveSlotMeta(patch) {
+    if (!activeSlotId) return null;
+    return updateSlotMeta(activeSlotId, patch);
+  }
+
+  function clearSlotData(slotId) {
+    var prefix = getSlotStoragePrefix(slotId);
+    var toRemove = [];
+    try {
+      for (var i = 0; i < localStorage.length; i += 1) {
+        var key = localStorage.key(i);
+        if (key && key.indexOf(prefix) === 0) {
+          toRemove.push(key);
+        }
+      }
+      toRemove.forEach(function (key) {
+        localStorage.removeItem(key);
+      });
+    } catch (err) {
+      console.warn("offline clearSlotData failed", slotId, err);
+    }
+  }
+
+  function getSlotSummaryText(slot) {
+    if (!slot || !slot.used) {
+      return offlineConfig.testSaveEnabled ? "新建后进入第" + offlineConfig.testSaveChapter + "章测试档" : "空存档";
+    }
+    return "第" + (slot.chapter || 1) + "章 / " + (slot.stageName || "待进入");
+  }
+
+  function markActiveSlotUsed() {
+    if (!activeSlotId) return;
+    var manager = ensureSaveManager();
+    var slot = manager.slots[activeSlotId] || createDefaultSlotMeta(activeSlotId);
+    updateActiveSlotMeta({
+      used: true,
+      createdAt: slot.createdAt || now(),
+      updatedAt: now(),
+    });
+  }
+
+  function setActiveSlot(slotId) {
+    var manager = ensureSaveManager();
+    activeSlotId = slotId;
+    manager.currentSlotId = slotId;
+    var slot = manager.slots[slotId] || createDefaultSlotMeta(slotId);
+    var currentTime = now();
+    slot.createdAt = slot.createdAt || currentTime;
+    slot.updatedAt = currentTime;
+    if (!slot.used && !slotHasScopedData(slotId)) {
+      slot.stageName = offlineConfig.testSaveEnabled ? "测试进度" : "新手开局";
+      slot.chapter = offlineConfig.testSaveEnabled ? offlineConfig.testSaveChapter : 1;
+    }
+    manager.slots[slotId] = slot;
+    saveRootJson("save-manager", manager);
+    return slot;
+  }
+
+  function getScopedUserDataKey(key) {
+    return getActiveStoragePrefix() + "userdata:" + key;
   }
 
   function snapshotPatchState() {
@@ -190,6 +443,7 @@
       notice: "提示",
       route: "路由",
       updateData: "存档",
+      slot: "存档位",
       sdk: "广告",
       nativeSdk: "原生",
       task: "任务",
@@ -221,6 +475,7 @@
       : "无";
     return [
       "离线调试面板",
+      "当前存档：" + (activeSlotId ? getSlotLabel(activeSlotId) : "未选择"),
       "当前场景：" + getCurrentSceneName(),
       "离线模式：已开启",
       "测试存档：" + (offlineConfig.testSaveEnabled ? "第" + offlineConfig.testSaveChapter + "章" : "已关闭"),
@@ -374,10 +629,200 @@
     }, 500);
   }
 
+  function releaseBootGate() {
+    if (bootGateState.ready) return;
+    bootGateState.ready = true;
+    if (!bootGateState.actualBoot || !bootGateState.pendingArgs) return;
+    var args = bootGateState.pendingArgs;
+    bootGateState.pendingArgs = null;
+    setTimeout(function () {
+      bootGateState.actualBoot.apply(window, args);
+    }, 0);
+  }
+
+  function installBootGate() {
+    if (bootGateState.installed) return;
+    bootGateState.installed = true;
+    Object.defineProperty(window, "boot", {
+      configurable: true,
+      enumerable: true,
+      get: function () {
+        return function () {
+          var args = Array.prototype.slice.call(arguments);
+          if (!bootGateState.ready || !bootGateState.actualBoot) {
+            bootGateState.pendingArgs = args;
+            return;
+          }
+          return bootGateState.actualBoot.apply(window, args);
+        };
+      },
+      set: function (fn) {
+        bootGateState.actualBoot = fn;
+      },
+    });
+  }
+
+  function hideSaveSelector() {
+    if (runtimeState.saveSelector) {
+      runtimeState.saveSelector.style.display = "none";
+    }
+  }
+
+  function createSlotCard(slotId, slot) {
+    var card = document.createElement("div");
+    card.style.cssText =
+      "border:1px solid rgba(240,210,140,0.35);border-radius:16px;padding:14px 14px 12px;" +
+      "background:rgba(16,20,28,0.92);box-shadow:0 12px 32px rgba(0,0,0,0.28);";
+
+    var title = document.createElement("div");
+    title.textContent = slot.name || getSlotLabel(slotId);
+    title.style.cssText = "font:700 16px/1.2 'PingFang SC','Microsoft YaHei',sans-serif;color:#f8f1d2;";
+
+    var summary = document.createElement("div");
+    summary.textContent = getSlotSummaryText(slot);
+    summary.style.cssText = "margin-top:10px;font:14px/1.4 'PingFang SC','Microsoft YaHei',sans-serif;color:#dce7ef;";
+
+    var meta = document.createElement("div");
+    meta.textContent = "最近游玩：" + formatDateTime(slot.updatedAt);
+    meta.style.cssText = "margin-top:6px;font:12px/1.4 'PingFang SC','Microsoft YaHei',sans-serif;color:rgba(220,231,239,0.72);";
+
+    var actions = document.createElement("div");
+    actions.style.cssText = "display:flex;gap:10px;margin-top:14px;";
+
+    function makeAction(label, styleText, onClick) {
+      var button = document.createElement("button");
+      button.type = "button";
+      button.textContent = label;
+      button.style.cssText = styleText;
+      button.addEventListener("click", onClick);
+      return button;
+    }
+
+    actions.appendChild(
+      makeAction(
+        slot.used ? "进入" : "新建",
+        "flex:1;padding:9px 0;border:0;border-radius:10px;background:#d1a64b;color:#12161f;" +
+          "font:700 14px 'PingFang SC','Microsoft YaHei',sans-serif;cursor:pointer;",
+        function () {
+          selectSaveSlot(slotId);
+        }
+      )
+    );
+
+    if (slot.used) {
+      actions.appendChild(
+        makeAction(
+          "删除",
+          "padding:9px 14px;border:1px solid rgba(255,255,255,0.18);border-radius:10px;background:transparent;" +
+            "color:#dce7ef;font:600 13px 'PingFang SC','Microsoft YaHei',sans-serif;cursor:pointer;",
+          function () {
+            if (!window.confirm("确认删除 " + (slot.name || getSlotLabel(slotId)) + " 吗？")) return;
+            clearSlotData(slotId);
+            updateSlotMeta(slotId, createDefaultSlotMeta(slotId));
+            logRuntime("slot", "已删除本地存档", { slot: getSlotLabel(slotId) });
+            renderSaveSelector();
+          }
+        )
+      );
+    }
+
+    card.appendChild(title);
+    card.appendChild(summary);
+    card.appendChild(meta);
+    card.appendChild(actions);
+    return card;
+  }
+
+  function renderSaveSelector() {
+    if (!runtimeState.saveSelectorBody) return;
+    var manager = ensureSaveManager();
+    runtimeState.saveSelectorBody.innerHTML = "";
+    getSlotIds().forEach(function (slotId) {
+      var slot = manager.slots[slotId] || createDefaultSlotMeta(slotId);
+      runtimeState.saveSelectorBody.appendChild(createSlotCard(slotId, slot));
+    });
+  }
+
+  function ensureSaveSelector() {
+    if (runtimeState.saveSelector || typeof document === "undefined" || !document.body) return;
+    var overlay = document.createElement("div");
+    overlay.style.cssText =
+      "position:fixed;inset:0;z-index:10000;display:flex;align-items:center;justify-content:center;" +
+      "padding:20px;background:linear-gradient(180deg, rgba(6,10,16,0.92), rgba(8,12,20,0.98));";
+
+    var panel = document.createElement("div");
+    panel.style.cssText =
+      "width:min(720px,100%);border:1px solid rgba(240,210,140,0.25);border-radius:22px;" +
+      "padding:22px;background:rgba(10,14,20,0.92);box-shadow:0 20px 60px rgba(0,0,0,0.45);";
+
+    var title = document.createElement("div");
+    title.textContent = "选择本地进度";
+    title.style.cssText = "font:700 24px/1.2 'PingFang SC','Microsoft YaHei',sans-serif;color:#f8f1d2;";
+
+    var subtitle = document.createElement("div");
+    subtitle.textContent = "开始游戏前先选择一个本地存档。每个进度都会单独保存资源、章节和邮件。";
+    subtitle.style.cssText =
+      "margin-top:10px;font:14px/1.6 'PingFang SC','Microsoft YaHei',sans-serif;color:rgba(220,231,239,0.8);";
+
+    var body = document.createElement("div");
+    body.style.cssText = "display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin-top:18px;";
+
+    panel.appendChild(title);
+    panel.appendChild(subtitle);
+    panel.appendChild(body);
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+
+    runtimeState.saveSelector = overlay;
+    runtimeState.saveSelectorBody = body;
+    renderSaveSelector();
+  }
+
+  function startOfflineSingleplayer() {
+    if (offlineInitialized) return;
+    offlineInitialized = true;
+    offlineConfig.debugPanelVisible = isDebugQueryEnabled();
+    stubPlatformSdk();
+    ensureProfile();
+    ensureSignState();
+    ensureDailyTaskState();
+    ensureOnlineBoxState();
+    ensureMailState();
+
+    tryInstallRuntimePatches();
+    installTimer = setInterval(tryInstallRuntimePatches, 25);
+    setTimeout(function () {
+      if (installTimer) {
+        clearInterval(installTimer);
+        installTimer = null;
+      }
+    }, oneDayMs);
+
+    snapshotPatchState();
+    installDebugPanel();
+    setDebugVisible(offlineConfig.debugPanelVisible);
+  }
+
+  function selectSaveSlot(slotId) {
+    var slot = setActiveSlot(slotId);
+    if (!slot.used) {
+      updateActiveSlotMeta({
+        used: true,
+        createdAt: slot.createdAt || now(),
+        updatedAt: now(),
+      });
+      slot = ensureSaveManager().slots[slotId] || slot;
+    }
+    logRuntime("slot", "已选择本地进度", { slot: slot.name || getSlotLabel(slotId), summary: getSlotSummaryText(slot) });
+    hideSaveSelector();
+    startOfflineSingleplayer();
+    releaseBootGate();
+  }
+
   function loadJson(key, fallback) {
     try {
-      var raw = localStorage.getItem(storagePrefix + key);
-      return raw ? JSON.parse(raw) : fallback;
+      var raw = localStorage.getItem(getActiveStoragePrefix() + key);
+      return parseJson(raw, fallback);
     } catch (err) {
       console.warn("offline loadJson failed", key, err);
       return fallback;
@@ -386,7 +831,8 @@
 
   function saveJson(key, value) {
     try {
-      localStorage.setItem(storagePrefix + key, JSON.stringify(value));
+      localStorage.setItem(getActiveStoragePrefix() + key, JSON.stringify(value));
+      markActiveSlotUsed();
     } catch (err) {
       console.warn("offline saveJson failed", key, err);
     }
@@ -851,6 +1297,17 @@
     saveJson("profile", profile);
   }
 
+  function updateActiveSlotProgress(payload) {
+    if (!activeSlotId || !payload) return;
+    updateActiveSlotMeta({
+      used: true,
+      createdAt: (ensureSaveManager().slots[activeSlotId] || createDefaultSlotMeta(activeSlotId)).createdAt || now(),
+      updatedAt: now(),
+      chapter: getDisplayedChapterNumber(payload.chapterIndex),
+      stageName: getStageDisplayName(payload.stageIndex),
+    });
+  }
+
   function maybeLogTestSave(result) {
     if (!result || !result.changed) return;
     var signature = [
@@ -866,6 +1323,7 @@
       chapter: getDisplayedChapterNumber(result.payload.chapterIndex),
       stageIndex: result.payload.stageIndex,
     });
+    updateActiveSlotProgress(result.payload);
     logRuntime("progression", "已应用第10章测试存档", {
       chapter: getDisplayedChapterNumber(result.payload.chapterIndex),
       stage: getStageDisplayName(result.payload.stageIndex),
@@ -916,12 +1374,15 @@
   }
 
   function writeUserDataRecord(key, value) {
+    var scopedKey = getScopedUserDataKey(key);
     try {
       if (window.cc && cc.sys && cc.sys.localStorage) {
-        cc.sys.localStorage.setItem(key, JSON.stringify(value));
+        cc.sys.localStorage.setItem(scopedKey, JSON.stringify(value));
+        markActiveSlotUsed();
         return;
       }
-      localStorage.setItem(key, JSON.stringify(value));
+      localStorage.setItem(scopedKey, JSON.stringify(value));
+      markActiveSlotUsed();
     } catch (err) {
       console.warn("offline writeUserDataRecord failed", key, err);
     }
@@ -1604,13 +2065,13 @@
 
     if (originalGetUserData) {
       instance.getUserData = function (key) {
-        return ensureTestingDoc(key, originalGetUserData(key));
+        return ensureTestingDoc(key, originalGetUserData(getScopedUserDataKey(key)));
       };
     }
 
     if (originalSetUserDocInfo) {
       instance.setUserDocInfo = function (key, payload) {
-        return ensureTestingDoc(key, originalSetUserDocInfo(key, payload));
+        return ensureTestingDoc(key, originalSetUserDocInfo(getScopedUserDataKey(key), payload));
       };
     }
 
@@ -1630,6 +2091,7 @@
         if (result.changed) {
           maybeLogTestSave(result);
         }
+        updateActiveSlotProgress(result.payload);
         return originalSetOnlineData(result.payload);
       };
     }
@@ -1642,6 +2104,7 @@
       Array.isArray(pc.vehicleList)
     ) {
       applyPcSeedToRuntime(pc, buildSeededProgression(extractPcPayload(pc)));
+      updateActiveSlotProgress(extractPcPayload(pc));
     }
 
     pc.__offlineSingleplayerSavePatched = true;
@@ -1956,22 +2419,8 @@
     return patched;
   }
 
-  offlineConfig.debugPanelVisible = isDebugQueryEnabled();
-  stubPlatformSdk();
-  ensureProfile();
-  ensureSignState();
-  ensureDailyTaskState();
-  ensureOnlineBoxState();
-  ensureMailState();
-
-  tryInstallRuntimePatches();
-  installTimer = setInterval(tryInstallRuntimePatches, 25);
-  setTimeout(function () {
-    if (installTimer) {
-      clearInterval(installTimer);
-      installTimer = null;
-    }
-  }, oneDayMs);
+  installBootGate();
+  ensureSaveManager();
 
   window.__OFFLINE_SINGLEPLAYER__ = {
     enabled: true,
@@ -1980,6 +2429,12 @@
     todayKey: todayKey,
     loadJson: loadJson,
     saveJson: saveJson,
+    saveManager: {
+      ensure: ensureSaveManager,
+      select: selectSaveSlot,
+      render: renderSaveSelector,
+      clear: clearSlotData,
+    },
     profile: {
       ensure: ensureProfile,
     },
@@ -2016,6 +2471,15 @@
   };
 
   snapshotPatchState();
-  installDebugPanel();
-  setDebugVisible(offlineConfig.debugPanelVisible);
+  if (document.readyState === "loading") {
+    document.addEventListener(
+      "DOMContentLoaded",
+      function () {
+        ensureSaveSelector();
+      },
+      { once: true }
+    );
+  } else {
+    ensureSaveSelector();
+  }
 })();
