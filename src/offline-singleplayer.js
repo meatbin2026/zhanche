@@ -147,29 +147,74 @@
     }
   }
 
+  function getPatchLabel(key) {
+    var labels = {
+      net: "网络替身",
+      sdk: "广告SDK",
+      nativeSdk: "原生SDK",
+      user: "用户数据",
+      task: "任务数据",
+      shop: "商店数据",
+      social: "社交占位",
+      pvp: "PVP降级",
+      quickMatch: "匹配降级",
+      userInfoMenu: "资料页",
+      friendMenu: "好友页",
+      favoriteMenu: "关注页",
+      desktopIcon: "桌面入口",
+      sideBarIcon: "侧边栏入口",
+    };
+    return labels[key] || key;
+  }
+
+  function getLogTypeLabel(type) {
+    var labels = {
+      notice: "提示",
+      route: "路由",
+      updateData: "存档",
+      sdk: "广告",
+      nativeSdk: "原生",
+      task: "任务",
+      "reward-off": "奖励",
+      "reward-block": "奖励",
+    };
+    return labels[type] || type;
+  }
+
+  function getRewardSourceLabel(source) {
+    var labels = {
+      video: "视频广告",
+      share: "分享奖励",
+      "native-video": "原生视频广告",
+      "native-share": "原生分享奖励",
+    };
+    return labels[source] || source;
+  }
+
   function buildDebugSnapshot() {
     snapshotPatchState();
     var patchLines = Object.keys(runtimeState.patchState).map(function (key) {
-      return key + ":" + (runtimeState.patchState[key] ? "on" : "off");
+      return getPatchLabel(key) + ":" + (runtimeState.patchState[key] ? "已挂载" : "未挂载");
     });
     var pending = runtimeState.pendingRewardBlock
-      ? runtimeState.pendingRewardBlock.source + (runtimeState.pendingRewardBlock.tag ? "(" + runtimeState.pendingRewardBlock.tag + ")" : "")
-      : "none";
+      ? getRewardSourceLabel(runtimeState.pendingRewardBlock.source) +
+        (runtimeState.pendingRewardBlock.tag ? "（" + runtimeState.pendingRewardBlock.tag + "）" : "")
+      : "无";
     return [
-      "Offline Debug Panel",
-      "scene: " + getCurrentSceneName(),
-      "offline: on",
-      "adRewards: " + (offlineConfig.adRewardsEnabled ? "enabled" : "disabled"),
-      "pendingRewardBlock: " + pending,
-      "sign: " + (ensureSignState().signCount || 0),
-      "dailyKeys: " + Object.keys(ensureDailyTaskState().status || {}).length,
-      "mail: " + ensureMailState().list.length,
-      "onlineBox: #" + (ensureOnlineBoxState().index || 0),
+      "离线调试面板",
+      "当前场景：" + getCurrentSceneName(),
+      "离线模式：已开启",
+      "广告奖励：" + (offlineConfig.adRewardsEnabled ? "已开启" : "已关闭"),
+      "待拦截奖励：" + pending,
+      "签到次数：" + (ensureSignState().signCount || 0),
+      "任务状态数：" + Object.keys(ensureDailyTaskState().status || {}).length,
+      "邮件数量：" + ensureMailState().list.length,
+      "在线宝箱：#" + (ensureOnlineBoxState().index || 0),
       "",
-      "patches:",
+      "补丁状态：",
       patchLines.join(" | "),
       "",
-      "recent logs:",
+      "最近日志：",
     ].concat(
       runtimeState.logs.length
         ? runtimeState.logs.map(function (entry) {
@@ -177,13 +222,13 @@
               "[" +
               formatClockTime(entry.at) +
               "] " +
-              entry.type +
+              getLogTypeLabel(entry.type) +
               " " +
               entry.message +
               (entry.details ? " " + entry.details : "")
             );
           })
-        : ["(empty)"]
+        : ["（暂无）"]
     );
   }
 
@@ -231,12 +276,12 @@
     }
 
     controls.appendChild(
-      makeButton("Hide", function () {
+      makeButton("隐藏", function () {
         setDebugVisible(false);
       })
     );
     controls.appendChild(
-      makeButton("Clear Logs", function () {
+      makeButton("清空日志", function () {
         runtimeState.logs = [];
         refreshDebugPanel();
       })
