@@ -278,6 +278,16 @@
     }
   }
 
+  function resetSlotToFreshStart(slotId) {
+    var manager = ensureSaveManager();
+    var current = manager.slots[slotId] || createDefaultSlotMeta(slotId);
+    var next = createDefaultSlotMeta(slotId);
+    next.name = current.name || next.name;
+    clearSlotData(slotId);
+    updateSlotMeta(slotId, next);
+    return next;
+  }
+
   function getSlotSummaryText(slot) {
     if (!slot || !slot.used) {
       return "新建后从正常开局开始";
@@ -707,13 +717,25 @@
     if (slot.used) {
       actions.appendChild(
         makeAction(
+          "重置",
+          "padding:9px 14px;border:1px solid rgba(209,166,75,0.45);border-radius:10px;background:rgba(209,166,75,0.08);" +
+            "color:#f0d28c;font:600 13px 'PingFang SC','Microsoft YaHei',sans-serif;cursor:pointer;",
+          function () {
+            if (!window.confirm("确认把 " + (slot.name || getSlotLabel(slotId)) + " 重置为新手开局吗？")) return;
+            resetSlotToFreshStart(slotId);
+            logRuntime("slot", "已重置本地存档", { slot: getSlotLabel(slotId) });
+            renderSaveSelector();
+          }
+        )
+      );
+      actions.appendChild(
+        makeAction(
           "删除",
           "padding:9px 14px;border:1px solid rgba(255,255,255,0.18);border-radius:10px;background:transparent;" +
             "color:#dce7ef;font:600 13px 'PingFang SC','Microsoft YaHei',sans-serif;cursor:pointer;",
           function () {
             if (!window.confirm("确认删除 " + (slot.name || getSlotLabel(slotId)) + " 吗？")) return;
-            clearSlotData(slotId);
-            updateSlotMeta(slotId, createDefaultSlotMeta(slotId));
+            resetSlotToFreshStart(slotId);
             logRuntime("slot", "已删除本地存档", { slot: getSlotLabel(slotId) });
             renderSaveSelector();
           }
@@ -2430,7 +2452,8 @@
       ensure: ensureSaveManager,
       select: selectSaveSlot,
       render: renderSaveSelector,
-      clear: clearSlotData,
+      clear: resetSlotToFreshStart,
+      reset: resetSlotToFreshStart,
     },
     profile: {
       ensure: ensureProfile,
