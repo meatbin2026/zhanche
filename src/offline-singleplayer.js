@@ -16,6 +16,8 @@
     debugBody: null,
     debugVisible: false,
     debugInstalled: false,
+    cornerTapCount: 0,
+    cornerTapUntil: 0,
   };
 
   function now() {
@@ -258,11 +260,46 @@
     if (runtimeState.debugInstalled || typeof document === "undefined") return;
     runtimeState.debugInstalled = true;
     ensureDebugPanel();
-    document.addEventListener("keydown", function (event) {
-      if (event.key === "`" || event.key === "~") {
+
+    function toggleFromEvent(event) {
+      var key = event && event.key;
+      var code = event && event.code;
+      var keyCode = event && event.keyCode;
+      if (key === "`" || key === "~" || code === "Backquote" || keyCode === 192) {
         setDebugVisible(!runtimeState.debugVisible);
+        return true;
       }
-    });
+      return false;
+    }
+
+    function handleCornerTap(event) {
+      if (!event) return;
+      var width = window.innerWidth || document.documentElement.clientWidth || 0;
+      var height = window.innerHeight || document.documentElement.clientHeight || 0;
+      var x = typeof event.clientX === "number" ? event.clientX : width;
+      var y = typeof event.clientY === "number" ? event.clientY : 0;
+      if (x < width - 72 || y > 72) return;
+      var ts = now();
+      if (runtimeState.cornerTapUntil < ts) {
+        runtimeState.cornerTapCount = 0;
+      }
+      runtimeState.cornerTapCount += 1;
+      runtimeState.cornerTapUntil = ts + 2000;
+      if (runtimeState.cornerTapCount >= 5) {
+        runtimeState.cornerTapCount = 0;
+        setDebugVisible(!runtimeState.debugVisible);
+        showOfflineNotice(runtimeState.debugVisible ? "调试面板已打开" : "调试面板已关闭");
+      }
+    }
+
+    document.addEventListener("keydown", toggleFromEvent);
+    document.addEventListener("keyup", toggleFromEvent);
+    if (window.addEventListener) {
+      window.addEventListener("keydown", toggleFromEvent);
+      window.addEventListener("keyup", toggleFromEvent);
+      window.addEventListener("pointerdown", handleCornerTap, true);
+      window.addEventListener("touchstart", handleCornerTap, true);
+    }
     setInterval(function () {
       if (runtimeState.debugVisible) {
         refreshDebugPanel();
@@ -1295,6 +1332,9 @@
       snapshotPatchState: snapshotPatchState,
       getSnapshot: buildDebugSnapshot,
       setDebugVisible: setDebugVisible,
+      toggleDebugVisible: function () {
+        setDebugVisible(!runtimeState.debugVisible);
+      },
       refreshDebugPanel: refreshDebugPanel,
     },
   };
