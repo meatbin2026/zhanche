@@ -469,6 +469,80 @@
     return state;
   }
 
+  function createDefaultShopState() {
+    return {
+      smallBoxCt: 11,
+      smallBoxTime: nextResetAt(),
+      midBoxTime: nextResetAt(),
+      bigBoxCt: 1,
+      bigBoxKey: 0,
+      bigBoxTime: nextResetAt(),
+      midBoxKey: 0,
+      itemBoxTime: nextResetAt(),
+      itemBoxSeed: (now() % 1999) + 1,
+      itemBoxStatus: {
+        0: 0,
+        1: 0,
+        2: 0,
+        3: 0,
+        4: 0,
+        5: 0,
+        6: 0,
+        7: 0,
+      },
+      refreshCt: 20,
+    };
+  }
+
+  function ensureShopState() {
+    var state = loadJson("shop", null);
+    var today = todayKey();
+    if (!state || state.lastDay !== today) {
+      state = assign(createDefaultShopState(), { lastDay: today });
+      saveJson("shop", state);
+      return state;
+    }
+    var changed = false;
+    var fallback = createDefaultShopState();
+    Object.keys(fallback).forEach(function (key) {
+      if (typeof state[key] === "undefined") {
+        state[key] = clone(fallback[key]);
+        changed = true;
+      }
+    });
+    if (changed) {
+      saveJson("shop", state);
+    }
+    return state;
+  }
+
+  function ensureGuideState() {
+    var profile = ensureProfile();
+    var guide = clone(profile.guide || {});
+    var defaults = {
+      hero: 4,
+      chapter: 2,
+      talent: 1,
+      equipmentSlot7: 1,
+      equipmentSlot8: 1,
+      desktop: 1,
+      sideBar: 1,
+      onlineBox: 2,
+    };
+    var changed = false;
+    Object.keys(defaults).forEach(function (key) {
+      if (typeof guide[key] === "undefined" || toNumber(guide[key], 0) < defaults[key]) {
+        guide[key] = defaults[key];
+        changed = true;
+      }
+    });
+    if (changed || !profile.guide) {
+      profile.guide = guide;
+      saveJson("profile", profile);
+    }
+    return guide;
+  }
+
   function createWelcomeMail() {
     return {
       list: [
@@ -973,6 +1047,23 @@
     };
   }
 
+  function buildShopPayload() {
+    var state = ensureShopState();
+    return {
+      smallBoxCt: state.smallBoxCt || 0,
+      smallBoxTime: state.smallBoxTime || nextResetAt(),
+      midBoxTime: state.midBoxTime || nextResetAt(),
+      bigBoxCt: state.bigBoxCt || 0,
+      bigBoxKey: state.bigBoxKey || 0,
+      bigBoxTime: state.bigBoxTime || nextResetAt(),
+      midBoxKey: state.midBoxKey || 0,
+      itemBoxTime: state.itemBoxTime || nextResetAt(),
+      itemBoxSeed: state.itemBoxSeed || 1,
+      itemBoxStatus: clone(state.itemBoxStatus || {}),
+      shopRefreshCt: typeof state.refreshCt === "number" ? state.refreshCt : 20,
+    };
+  }
+
   function buildMailTable(ids) {
     var state = ensureMailState();
     var result = {};
@@ -1021,6 +1112,41 @@
         score: "第" + chapterNumber + "章",
       },
     ];
+  }
+
+  function updateShopStateFromPayload(payload) {
+    if (!payload || typeof payload !== "object") return false;
+    var state = ensureShopState();
+    var changed = false;
+    [
+      "smallBoxCt",
+      "smallBoxTime",
+      "midBoxTime",
+      "bigBoxCt",
+      "bigBoxKey",
+      "bigBoxTime",
+      "midBoxKey",
+      "itemBoxTime",
+      "itemBoxSeed",
+      "shopRefreshCt",
+    ].forEach(function (key) {
+      if (typeof payload[key] !== "undefined") {
+        var mappedKey = key === "shopRefreshCt" ? "refreshCt" : key;
+        if (JSON.stringify(state[mappedKey]) !== JSON.stringify(payload[key])) {
+          state[mappedKey] = clone(payload[key]);
+          changed = true;
+        }
+      }
+    });
+    if (typeof payload.itemBoxStatus !== "undefined") {
+      state.itemBoxStatus = clone(payload.itemBoxStatus || {});
+      changed = true;
+    }
+    if (changed) {
+      state.lastDay = todayKey();
+      saveJson("shop", state);
+    }
+    return changed;
   }
 
   function patchNet() {
@@ -1142,6 +1268,9 @@
             }
           });
           saveJson("daily-task", daily);
+          if (updateShopStateFromPayload(request.set) && window.shop) {
+            assign(window.shop, buildShopPayload());
+          }
         }
 
         if (request.add && !Object.keys(request.add).length) {
@@ -1166,6 +1295,15 @@
               saveJson("mail", {
                 list: clone(merged.mailList),
                 table: clone((window.user && window.user.mailInfoTable) || {}),
+              });
+            }
+            if (updateShopStateFromPayload(merged)) {
+              if (window.shop) {
+                assign(window.shop, buildShopPayload());
+              }
+              logRuntime("route", "商店数据已同步到本地", {
+                itemBoxSeed: merged.itemBoxSeed || null,
+                refreshCt: typeof merged.shopRefreshCt !== "undefined" ? merged.shopRefreshCt : null,
               });
             }
           }
@@ -1273,6 +1411,7 @@
       user.setOnlineData = function (payload) {
         var next = clone(payload || {});
         applyResourceFloorToPayload(next);
+        next.guide = assign(ensureGuideState(), clone(next.guide || {}));
         assign(next, buildSignPayload());
         var mail = ensureMailState();
         next.mailList = clone(mail.list);
@@ -1285,6 +1424,7 @@
     user.mailList = clone(ensureMailState().list);
     user.mailInfoTable = clone(ensureMailState().table);
     user.feedSubscribeId = "";
+    user.guide = assign(ensureGuideState(), clone(user.guide || {}));
 
     user.__offlineSingleplayerPatched = true;
     return true;
@@ -1348,18 +1488,60 @@
     if (originalSetOnlineData) {
       shop.setOnlineData = function (payload) {
         var next = clone(payload || {});
+        assign(next, buildShopPayload());
         assign(next, buildOnlineBoxPayload());
+        updateShopStateFromPayload(next);
         return originalSetOnlineData(next);
       };
     }
 
-    var online = buildOnlineBoxPayload();
-    shop.onlineRefreshTime = now() + online.onlineRefreshTime;
-    shop.onlineBoxIndex = online.onlineBoxIndex;
-    shop.onlineBoxTime = online.onlineBoxTime;
-    shop.onlineBoxStartTime = now();
+    assign(shop, buildShopPayload());
+    if (shop.loadOnlineBoxData) {
+      shop.loadOnlineBoxData(buildOnlineBoxPayload());
+    } else {
+      var online = buildOnlineBoxPayload();
+      shop.onlineRefreshTime = online.onlineRefreshTime;
+      shop.onlineBoxIndex = online.onlineBoxIndex;
+      shop.onlineBoxTime = online.onlineBoxTime;
+      shop.onlineBoxStartTime = now();
+    }
 
     shop.__offlineSingleplayerPatched = true;
+    return true;
+  }
+
+  function patchMainMenu() {
+    var MainMenu = safeRequire("MainMenu");
+    if (!MainMenu || !MainMenu.prototype || MainMenu.prototype.__offlineSingleplayerPatched) {
+      return false;
+    }
+
+    var originalUpdateGuide = MainMenu.prototype.updateGuide;
+
+    MainMenu.prototype.updateGuide = function () {
+      if (!offlineConfig.testSaveEnabled) {
+        return originalUpdateGuide ? originalUpdateGuide.apply(this, arguments) : false;
+      }
+      var mapMenu = this.pageList && this.pageList[2] && this.pageList[2].getComponent && this.pageList[2].getComponent("Menu");
+      var sideBoards = mapMenu && mapMenu.sideBoards;
+      if (sideBoards && sideBoards.length) {
+        for (var i = 0; i < sideBoards.length; i += 1) {
+          if (sideBoards[i]) {
+            sideBoards[i].active = true;
+          }
+        }
+      }
+      if (mapMenu) {
+        if (mapMenu.signNode) mapMenu.signNode.active = true;
+        if (mapMenu.mailNode) mapMenu.mailNode.active = true;
+        if (mapMenu.offlineTaskNode) mapMenu.offlineTaskNode.active = true;
+        if (mapMenu.dailyTaskNode) mapMenu.dailyTaskNode.active = true;
+        if (mapMenu.stageTaskNode) mapMenu.stageTaskNode.active = true;
+      }
+      return false;
+    };
+
+    MainMenu.prototype.__offlineSingleplayerPatched = true;
     return true;
   }
 
@@ -1731,6 +1913,7 @@
     patched = patchShop() || patched;
     patched = patchSocial() || patched;
     patched = patchPc() || patched;
+    patched = patchMainMenu() || patched;
     patched = patchPvp() || patched;
     patched = patchQuickMatch() || patched;
     patched = patchUserInfoMenu() || patched;
