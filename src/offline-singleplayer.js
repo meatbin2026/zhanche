@@ -14,14 +14,9 @@
   var adRewardDisabledNoticeText = "单机版暂时关闭广告奖励，页面流程会继续但不发奖";
   var offlineConfig = {
     adRewardsEnabled: false,
-    testSaveEnabled: true,
-    testSaveChapter: 10,
-    testSaveResourceFloor: {
-      gold: 200000,
-      diamond: 3000,
-      energy: 200,
-      exp: 4000,
-    },
+    testSaveEnabled: false,
+    testSaveChapter: 1,
+    testSaveResourceFloor: {},
     maxLogs: 20,
     debugPanelVisible: false,
     saveSlotCount: 3,
@@ -153,8 +148,8 @@
       used: false,
       createdAt: 0,
       updatedAt: 0,
-      chapter: offlineConfig.testSaveEnabled ? offlineConfig.testSaveChapter : 1,
-      stageName: offlineConfig.testSaveEnabled ? "测试进度" : "新手开局",
+      chapter: 1,
+      stageName: "新手开局",
     };
   }
 
@@ -285,7 +280,7 @@
 
   function getSlotSummaryText(slot) {
     if (!slot || !slot.used) {
-      return offlineConfig.testSaveEnabled ? "新建后进入第" + offlineConfig.testSaveChapter + "章测试档" : "空存档";
+      return "新建后从正常开局开始";
     }
     return "第" + (slot.chapter || 1) + "章 / " + (slot.stageName || "待进入");
   }
@@ -310,8 +305,8 @@
     slot.createdAt = slot.createdAt || currentTime;
     slot.updatedAt = currentTime;
     if (!slot.used && !slotHasScopedData(slotId)) {
-      slot.stageName = offlineConfig.testSaveEnabled ? "测试进度" : "新手开局";
-      slot.chapter = offlineConfig.testSaveEnabled ? offlineConfig.testSaveChapter : 1;
+      slot.stageName = "新手开局";
+      slot.chapter = 1;
     }
     manager.slots[slotId] = slot;
     saveRootJson("save-manager", manager);
@@ -427,7 +422,7 @@
       social: "社交占位",
       pvp: "PVP降级",
       quickMatch: "匹配降级",
-      testSave: "测试存档",
+      testSave: "章节跳档",
       userDataMgr: "资源存档",
       userInfoMenu: "资料页",
       friendMenu: "好友页",
@@ -478,7 +473,7 @@
       "当前存档：" + (activeSlotId ? getSlotLabel(activeSlotId) : "未选择"),
       "当前场景：" + getCurrentSceneName(),
       "离线模式：已开启",
-      "测试存档：" + (offlineConfig.testSaveEnabled ? "第" + offlineConfig.testSaveChapter + "章" : "已关闭"),
+      "章节跳档：" + (offlineConfig.testSaveEnabled ? "已开启" : "已关闭"),
       "当前进度：" + getProgressionSummary(),
       "广告奖励：" + (offlineConfig.adRewardsEnabled ? "已开启" : "已关闭"),
       "待拦截奖励：" + pending,
@@ -1319,12 +1314,12 @@
     if (runtimeState.lastTestSaveSignature === signature) return;
     runtimeState.lastTestSaveSignature = signature;
     persistProfileTestSave({
-      enabled: true,
+      enabled: !!offlineConfig.testSaveEnabled,
       chapter: getDisplayedChapterNumber(result.payload.chapterIndex),
       stageIndex: result.payload.stageIndex,
     });
     updateActiveSlotProgress(result.payload);
-    logRuntime("progression", "已应用第10章测试存档", {
+    logRuntime("progression", "已应用章节进度修正", {
       chapter: getDisplayedChapterNumber(result.payload.chapterIndex),
       stage: getStageDisplayName(result.payload.stageIndex),
       heroes: Object.keys(result.payload.hero || {}).length,
@@ -1871,7 +1866,9 @@
     if (originalSetOnlineData) {
       user.setOnlineData = function (payload) {
         var next = clone(payload || {});
-        applyResourceFloorToPayload(next);
+        if (offlineConfig.testSaveEnabled) {
+          applyResourceFloorToPayload(next);
+        }
         next.guide = assign(ensureGuideState(), clone(next.guide || {}));
         assign(next, buildSignPayload());
         var mail = ensureMailState();
@@ -2052,9 +2049,9 @@
     function ensureTestingDoc(key, data) {
       var next = clone(data || {});
       next.doc = next.doc || {};
-      if (applyResourceFloorToDoc(next.doc)) {
+      if (offlineConfig.testSaveEnabled && applyResourceFloorToDoc(next.doc)) {
         writeUserDataRecord(key, next);
-        logRuntime("progression", "已补齐第10章测试资源", {
+        logRuntime("progression", "已补齐章节测试资源", {
           gold: next.doc.gold || 0,
           diamond: next.doc.diamond || 0,
           energy: next.doc.energy || 0,
