@@ -2,6 +2,7 @@
   var storagePrefix = "offline_singleplayer:";
   var oneDayMs = 24 * 60 * 60 * 1000;
   var installTimer = null;
+  var offlineNoticeText = "单机版不支持联网功能";
 
   function now() {
     return Date.now();
@@ -165,20 +166,12 @@
     return merged;
   }
 
-  function setDeep(target, key, value) {
-    if (!key || key.indexOf(".") === -1) {
-      target[key] = value;
-      return;
+  function safeRequire(name) {
+    try {
+      return window.__require ? window.__require(name) : null;
+    } catch (err) {
+      return null;
     }
-    var ref = target;
-    var parts = key.split(".");
-    for (var i = 0; i < parts.length - 1; i += 1) {
-      if (!ref[parts[i]] || typeof ref[parts[i]] !== "object") {
-        ref[parts[i]] = {};
-      }
-      ref = ref[parts[i]];
-    }
-    ref[parts[parts.length - 1]] = value;
   }
 
   function stubPlatformSdk() {
@@ -261,6 +254,40 @@
       }
     });
     return result;
+  }
+
+  function showOfflineNotice(message) {
+    var text = message || offlineNoticeText;
+    if (window.kit && kit.info) {
+      kit.info(text);
+      return;
+    }
+    console.log(text);
+  }
+
+  function getOfflineUserName() {
+    if (window.user && window.user.getUserName && window.user.getUserName()) {
+      return window.user.getUserName();
+    }
+    return "单机玩家";
+  }
+
+  function getOfflineHeadUrl() {
+    if (window.user && window.user.getUserHeadUrl && window.user.getUserHeadUrl()) {
+      return window.user.getUserHeadUrl();
+    }
+    return "0";
+  }
+
+  function buildOfflineRankList() {
+    return [
+      {
+        rank: 1,
+        name: getOfflineUserName(),
+        avatarUrl: getOfflineHeadUrl(),
+        score: window.pc && pc.getChapterIndex ? pc.getChapterIndex() || 1 : 1,
+      },
+    ];
   }
 
   function patchNet() {
@@ -533,6 +560,131 @@
     return true;
   }
 
+  function patchSocial() {
+    if (!window.user) return false;
+    if (!window.hg) {
+      window.hg = {};
+    }
+    if (window.hg.__offlineSingleplayerPatched) return false;
+
+    window.hg.getUserInfo = function (options) {
+      setTimeout(function () {
+        if (options && options.success) {
+          options.success({
+            userInfo: {
+              nickName: getOfflineUserName(),
+              avatarUrl: getOfflineHeadUrl(),
+            },
+          });
+        }
+      }, 0);
+    };
+
+    window.hg.getRank = function (options) {
+      setTimeout(function () {
+        if (options && options.success) {
+          options.success({
+            ranks: buildOfflineRankList(),
+          });
+        }
+      }, 0);
+    };
+
+    window.hg.__offlineSingleplayerPatched = true;
+    return true;
+  }
+
+  function patchPvp() {
+    var pvp = window.pvp || safeRequire("pvp");
+    if (!pvp || pvp.__offlineSingleplayerPatched) return false;
+    var originalGetModeData = pvp.getModeData && pvp.getModeData.bind(pvp);
+
+    pvp.updateModeData = function (mode, cb) {
+      var data = originalGetModeData ? originalGetModeData(mode) : null;
+      if (data) {
+        data.power = 0;
+        data.date = 0;
+        data.opened = false;
+      }
+      if (cb) cb();
+    };
+
+    pvp.isModeOpened = function () {
+      return false;
+    };
+
+    pvp.getModePower = function () {
+      return 0;
+    };
+
+    pvp.getModeTime = function () {
+      return 0;
+    };
+
+    pvp.__offlineSingleplayerPatched = true;
+    return true;
+  }
+
+  function patchQuickMatch() {
+    var quickMatch = window.quickMatch || safeRequire("quickMatch");
+    if (!quickMatch || quickMatch.__offlineSingleplayerPatched) return false;
+
+    function deny(cb) {
+      showOfflineNotice("单机版不支持联网对战");
+      setTimeout(function () {
+        if (cb) cb(-1);
+      }, 0);
+    }
+
+    quickMatch.start = function (cb) {
+      deny(cb);
+    };
+
+    quickMatch.accept = function (cb) {
+      deny(cb);
+    };
+
+    quickMatch.join = function () {
+      deny(quickMatch.matchCb);
+    };
+
+    quickMatch.matching = function () {
+      deny(quickMatch.matchCb);
+    };
+
+    quickMatch.pushRobot = function () {
+      deny(quickMatch.matchCb);
+    };
+
+    quickMatch.timeout = function () {
+      deny(quickMatch.matchCb);
+    };
+
+    quickMatch.__offlineSingleplayerPatched = true;
+    return true;
+  }
+
+  function patchUserInfoMenu() {
+    var UserInfoMenu = safeRequire("UserInfoMenu");
+    if (!UserInfoMenu || !UserInfoMenu.prototype || UserInfoMenu.prototype.__offlineSingleplayerPatched) {
+      return false;
+    }
+
+    var originalInitStatus = UserInfoMenu.prototype.initStatus;
+
+    UserInfoMenu.prototype.initStatus = function () {
+      if (originalInitStatus) {
+        originalInitStatus.apply(this, arguments);
+      }
+      if (this.pvpBoard) {
+        this.pvpBoard.active = false;
+      }
+    };
+
+    UserInfoMenu.prototype.__offlineSingleplayerPatched = true;
+    return true;
+  }
+
   function tryInstallRuntimePatches() {
     var patched = false;
     patched = patchNet() || patched;
@@ -540,6 +692,10 @@
     patched = patchUser() || patched;
     patched = patchTask() || patched;
     patched = patchShop() || patched;
+    patched = patchSocial() || patched;
+    patched = patchPvp() || patched;
+    patched = patchQuickMatch() || patched;
+    patched = patchUserInfoMenu() || patched;
 
     if (
       window.net &&
@@ -552,6 +708,11 @@
       window.user.__offlineSingleplayerPatched &&
       window.task.__offlineSingleplayerPatched &&
       window.shop.__offlineSingleplayerPatched &&
+      window.hg &&
+      window.hg.__offlineSingleplayerPatched &&
+      (!(window.pvp || safeRequire("pvp")) || (window.pvp || safeRequire("pvp")).__offlineSingleplayerPatched) &&
+      (!(window.quickMatch || safeRequire("quickMatch")) || (window.quickMatch || safeRequire("quickMatch")).__offlineSingleplayerPatched) &&
+      (!safeRequire("UserInfoMenu") || safeRequire("UserInfoMenu").prototype.__offlineSingleplayerPatched) &&
       installTimer
     ) {
       clearInterval(installTimer);
@@ -600,6 +761,9 @@
     },
     mail: {
       ensure: ensureMailState,
+    },
+    social: {
+      buildOfflineRankList: buildOfflineRankList,
     },
     runtime: {
       tryInstallRuntimePatches: tryInstallRuntimePatches,
