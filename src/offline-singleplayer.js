@@ -34,6 +34,11 @@
     lastTestSaveSignature: "",
     saveSelector: null,
     saveSelectorBody: null,
+    startupQuiet: {
+      active: false,
+      userInteracted: false,
+      startedAt: 0,
+    },
   };
 
   function getManagerStorageKey() {
@@ -47,6 +52,31 @@
   function getActiveStoragePrefix() {
     var slotId = activeSlotId || "slot-1";
     return getSlotStoragePrefix(slotId);
+  }
+
+  function isStartupQuietActive() {
+    var state = runtimeState.startupQuiet;
+    if (!state.active) return false;
+    if (state.userInteracted) return false;
+    if (now() - state.startedAt > 15000) {
+      state.active = false;
+      return false;
+    }
+    return true;
+  }
+
+  function beginStartupQuietWindow() {
+    runtimeState.startupQuiet.active = true;
+    runtimeState.startupQuiet.userInteracted = false;
+    runtimeState.startupQuiet.startedAt = now();
+    logRuntime("startup", "已开启开机静默窗口", { seconds: 15 });
+  }
+
+  function markStartupInteraction(source) {
+    if (!runtimeState.startupQuiet.active || runtimeState.startupQuiet.userInteracted) return;
+    runtimeState.startupQuiet.userInteracted = true;
+    runtimeState.startupQuiet.active = false;
+    logRuntime("startup", "检测到首次主动操作，结束开机静默", { source: source || "unknown" });
   }
 
   function now() {
@@ -359,6 +389,9 @@
     patchState.favoriteMenu = !!(
       !safeRequire("FavoriteMenu") || safeRequire("FavoriteMenu").prototype.__offlineSingleplayerPatched
     );
+    patchState.startupQuiet = !!(
+      !window.menuManager || window.menuManager.__offlineSingleplayerStartupPatched
+    );
     patchState.desktopIcon = !!(!window.initDesktopIcon || window.initDesktopIcon.__offlineSingleplayerPatched);
     patchState.sideBarIcon = !!(!window.initSideBarIcon || window.initSideBarIcon.__offlineSingleplayerPatched);
     return patchState;
@@ -437,6 +470,7 @@
       userInfoMenu: "资料页",
       friendMenu: "好友页",
       favoriteMenu: "关注页",
+      startupQuiet: "开机静默",
       desktopIcon: "桌面入口",
       sideBarIcon: "侧边栏入口",
     };
@@ -449,6 +483,7 @@
       route: "路由",
       updateData: "存档",
       slot: "存档位",
+      startup: "启动",
       sdk: "广告",
       nativeSdk: "原生",
       task: "任务",
@@ -483,6 +518,7 @@
       "当前存档：" + (activeSlotId ? getSlotLabel(activeSlotId) : "未选择"),
       "当前场景：" + getCurrentSceneName(),
       "离线模式：已开启",
+      "开机静默：" + (isStartupQuietActive() ? "生效中" : "未生效"),
       "章节跳档：" + (offlineConfig.testSaveEnabled ? "已开启" : "已关闭"),
       "当前进度：" + getProgressionSummary(),
       "广告奖励：" + (offlineConfig.adRewardsEnabled ? "已开启" : "已关闭"),
@@ -621,11 +657,34 @@
 
     document.addEventListener("keydown", toggleFromEvent);
     document.addEventListener("keyup", toggleFromEvent);
+    document.addEventListener(
+      "keydown",
+      function () {
+        markStartupInteraction("keyboard");
+      },
+      true
+    );
     if (window.addEventListener) {
       window.addEventListener("keydown", toggleFromEvent);
       window.addEventListener("keyup", toggleFromEvent);
       window.addEventListener("pointerdown", handleCornerTap, true);
       window.addEventListener("touchstart", handleCornerTap, true);
+      window.addEventListener(
+        "pointerdown",
+        function () {
+          if (runtimeState.saveSelector && runtimeState.saveSelector.style.display !== "none") return;
+          markStartupInteraction("pointer");
+        },
+        true
+      );
+      window.addEventListener(
+        "touchstart",
+        function () {
+          if (runtimeState.saveSelector && runtimeState.saveSelector.style.display !== "none") return;
+          markStartupInteraction("touch");
+        },
+        true
+      );
     }
     setInterval(function () {
       if (runtimeState.debugVisible) {
@@ -832,6 +891,7 @@
     }
     logRuntime("slot", "已选择本地进度", { slot: slot.name || getSlotLabel(slotId), summary: getSlotSummaryText(slot) });
     hideSaveSelector();
+    beginStartupQuietWindow();
     startOfflineSingleplayer();
     releaseBootGate();
   }
@@ -2025,6 +2085,58 @@
     return true;
   }
 
+  function shouldSuppressStartupPopup(name) {
+    if (!isStartupQuietActive()) return false;
+    var target = String(name || "").replace(/^prefab\/pop\//, "");
+    var blocked = {
+      mail: true,
+      online_box: true,
+      video: true,
+      video_guide: true,
+      side_bar_help: true,
+      notice: true,
+      show: true,
+      loot: true,
+    };
+    if (!blocked[target]) return false;
+    try {
+      var currentName = window.menuManager && menuManager.currentName ? menuManager.currentName() : "";
+      if (currentName && currentName !== "main" && currentName !== "scene/main" && currentName !== "login") {
+        return false;
+      }
+    } catch (err) {}
+    return true;
+  }
+
+  function patchMenuManagerPop() {
+    if (!window.menuManager || window.menuManager.__offlineSingleplayerStartupPatched) return false;
+    var manager = window.menuManager;
+    var originalPop = manager.pop && manager.pop.bind(manager);
+    if (!originalPop) return false;
+
+    manager.pop = function (name, args, cb) {
+      var popupName = typeof name === "object" ? name && name.name : name;
+      if (shouldSuppressStartupPopup(popupName)) {
+        logRuntime("startup", "已拦截开机弹窗", { popup: popupName || "" });
+        if (cb) {
+          setTimeout(function () {
+            cb(null, null);
+          }, 0);
+        }
+        return {
+          menuName: popupName || "",
+          suppressedByOfflineSingleplayer: true,
+          onMenuBack: function () {},
+          close: function () {},
+        };
+      }
+      return originalPop(name, args, cb);
+    };
+
+    manager.__offlineSingleplayerStartupPatched = true;
+    return true;
+  }
+
   function patchSocial() {
     if (!window.user) return false;
     if (!window.hg) {
@@ -2396,6 +2508,7 @@
     patched = patchSocial() || patched;
     patched = patchPc() || patched;
     patched = patchMainMenu() || patched;
+    patched = patchMenuManagerPop() || patched;
     patched = patchPvp() || patched;
     patched = patchQuickMatch() || patched;
     patched = patchUserInfoMenu() || patched;
